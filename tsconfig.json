@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["bun-types"]
+  },
+  "include": [
+    "apps/**/*.ts",
+    "apps/**/*.svelte",
+    "packages/**/*.ts"
+  ]
+}
