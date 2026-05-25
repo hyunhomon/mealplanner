@@ -1,4 +1,5 @@
 import type { IngredientCatalogItem, IngredientCatalogSearchParams } from '@mealplanner/shared';
+import { getEnv } from '../env';
 
 interface EcoFriendlyPriceRow {
   exmn_ymd?: string;
@@ -83,7 +84,7 @@ export class IngredientCatalogError extends Error {
 export const fetchIngredientCatalog = async (
   params: IngredientCatalogSearchParams = {}
 ) => {
-  const serviceKey = Bun.env.INGREDIENT_API_KEY;
+  const serviceKey = getEnv('INGREDIENT_API_KEY');
   if (!serviceKey) {
     throw new IngredientCatalogError('INGREDIENT_API_KEY is not configured');
   }
@@ -94,13 +95,13 @@ export const fetchIngredientCatalog = async (
   const from = new Date(to);
   from.setDate(to.getDate() - DEFAULT_LOOKBACK_DAYS);
 
-  const url = new URL(Bun.env.INGREDIENT_API_BASE_URL || DEFAULT_BASE_URL);
+  const url = new URL(getEnv('INGREDIENT_API_BASE_URL') || DEFAULT_BASE_URL);
   url.searchParams.set('serviceKey', serviceKey);
   url.searchParams.set('pageNo', String(page));
   url.searchParams.set('numOfRows', String(pageSize));
   url.searchParams.set('returnType', 'JSON');
-  url.searchParams.set('cond[exmn_ymd::GTE]', Bun.env.INGREDIENT_API_FROM_DATE || formatDate(from));
-  url.searchParams.set('cond[exmn_ymd::LTE]', Bun.env.INGREDIENT_API_TO_DATE || formatDate(to));
+  url.searchParams.set('cond[exmn_ymd::GTE]', getEnv('INGREDIENT_API_FROM_DATE') || formatDate(from));
+  url.searchParams.set('cond[exmn_ymd::LTE]', getEnv('INGREDIENT_API_TO_DATE') || formatDate(to));
   if (params.itemCode) url.searchParams.set('cond[item_cd::EQ]', params.itemCode);
 
   const response = await fetch(url);

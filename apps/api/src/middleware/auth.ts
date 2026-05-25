@@ -6,19 +6,27 @@ const getBearerToken = (authorization: string | undefined) => {
   return authorization.slice('Bearer '.length).trim();
 };
 
+const unauthorized = () => {
+  const error = new Error('Unauthorized') as Error & { status: number; code: string };
+  error.status = 401;
+  error.code = 'UNAUTHORIZED';
+  return error;
+};
+
 export const authMiddleware = new Elysia()
-  .derive(async ({ headers, set }) => {
+  .resolve(async ({ headers, set }) => {
     const token = getBearerToken(headers.authorization);
     if (!token) {
       set.status = 401;
-      throw new Error('Unauthorized');
+      throw unauthorized();
     }
 
     const { data: { user }, error } = await supabase.auth.getUser(token);
     if (error || !user) {
       set.status = 401;
-      throw new Error('Unauthorized');
+      throw unauthorized();
     }
 
     return { user };
-  });
+  })
+  .as('global');

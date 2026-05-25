@@ -3,8 +3,9 @@ import { supabase } from '../supabase';
 import { authMiddleware } from '../middleware/auth';
 import { authSchemas } from '../schemas';
 import { fail, ok } from '../lib/responses';
+import { getEnv } from '../env';
 
-const redirectTo = Bun.env.AUTH_REDIRECT_URL ?? 'http://localhost:5173';
+const redirectTo = () => getEnv('AUTH_REDIRECT_URL') ?? 'http://localhost:5173';
 
 export const authRoutes = new Elysia({ prefix: '/auth', tags: ['Auth'] })
   .post('/signup', async ({ body, set }) => {
@@ -66,7 +67,7 @@ export const authRoutes = new Elysia({ prefix: '/auth', tags: ['Auth'] })
   .post('/google', async ({ set }) => {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
-      options: { redirectTo }
+      options: { redirectTo: redirectTo() }
     });
     if (error) return fail(set, 400, 'OAUTH_URL_FAILED', error.message);
 
@@ -81,7 +82,7 @@ export const authRoutes = new Elysia({ prefix: '/auth', tags: ['Auth'] })
   .post('/apple', async ({ set }) => {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'apple',
-      options: { redirectTo }
+      options: { redirectTo: redirectTo() }
     });
     if (error) return fail(set, 400, 'OAUTH_URL_FAILED', error.message);
 

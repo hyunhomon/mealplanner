@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "mealplanner-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-25",
+  "routes": [
+    {
+      "pattern": "api.greeney.life",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "WEB_ORIGIN": "https://greeney.life,https://www.greeney.life,http://localhost:5173",
+    "AUTH_REDIRECT_URL": "https://greeney.life",
+    "INGREDIENT_API_BASE_URL": "https://api.agromarket.kr/api/ecoFriendly/v1/price",
+    "RECIPE_API_BASE_URL": "https://openapi.foodsafetykorea.go.kr/api",
+    "RECIPE_RECOMMENDATION_SCAN_LIMIT": "1000"
+  }
+}
