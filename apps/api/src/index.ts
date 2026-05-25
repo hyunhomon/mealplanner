@@ -4,6 +4,8 @@ import { swagger } from '@elysiajs/swagger';
 import { authRoutes } from './routes/auth';
 import { ingredientRoutes } from './routes/ingredients';
 import { recipeRoutes } from './routes/recipes';
+import { characterRoutes } from './routes/character';
+import { preferencesRoutes } from './routes/preferences';
 import { fail } from './lib/responses';
 
 const app = new Elysia()
@@ -52,6 +54,8 @@ const app = new Elysia()
   .use(authRoutes)
   .use(ingredientRoutes)
   .use(recipeRoutes)
+  .use(characterRoutes)
+  .use(preferencesRoutes)
   .listen(3000);
 
 console.log(`http://localhost:3000`);

@@ -3,21 +3,20 @@ import { supabase } from '../supabase';
 import { authMiddleware } from '../middleware/auth';
 import { getItemCode } from '../lib/itemCodes';
 
-// 💡 실시간 kg당 단가 API 규격과 동기화하기 위한 자취생 표준 중량 환산 매퍼
 const INGREDIENT_WEIGHTS_KG: Record<string, number> = {
-  '대파': 0.5,  // 1단 = 0.5kg
-  '양파': 0.2,  // 1개 = 0.2kg
-  '두부': 0.3,  // 1모 = 0.3kg
-  '배추': 2.0,  // 1통 = 2.0kg
-  '계란': 0.06, // 1알 = 0.06kg
-  '기타': 0.2   // 기본 미지정 품목 0.2kg 상정
+  '\uB300\uD30C': 0.5,
+  '\uC591\uD30C': 0.2,
+  '\uB450\uBD80': 0.3,
+  '\uBC30\uCD94': 2.0,
+  '\uACC4\uB780': 0.06,
+  default: 0.2
 };
 
 export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   .use(authMiddleware)
 
   /*미소비 식재료 목록 조회*/
-  .get('/', async ({ user }) => {
+  .get('/', async ({ user }: any) => {
     const { data, error } = await supabase
       .from('ingredients')
       .select('*')
@@ -30,7 +29,7 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   })
 
   /*식재료 수동 등록 (슬라이더 양 입력)*/
-  .post('/', async ({ body, user, set }) => {
+  .post('/', async ({ body, user, set }: any) => {
     const { name, quantity, expired_at } = body;
 
     // 음수 방지
@@ -66,7 +65,7 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   })
 
   /*영수증 OCR 및 음성 데이터 텍스트 인식*/
-  .post('/parse-scan', async ({ body, user }) => {
+  .post('/parse-scan', async ({ body, user }: any) => {
     const { type, payload } = body;
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -123,7 +122,7 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   })
 
   /* 식재료 직접 수동 소비 및 실시간 시세 계산 처리 */
-  .post('/consume', async ({ body, user }) => {
+  .post('/consume', async ({ body, user }: any) => {
     const { ingredient_id, carbon_reduced } = body;
     const API_KEY = Bun.env.FOODSAFETY_API_KEY;
 
@@ -138,12 +137,12 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
     if (findError || !ingredient) return { success: false, error: '식재료를 찾을 수 없습니다.' };
 
     // 2. [수정] 수량을 공공 표준 kg 단위로 환산
-    const ingredientName = ingredient.name || '기타';
-    const unitWeightKg = INGREDIENT_WEIGHTS_KG[ingredientName] || INGREDIENT_WEIGHTS_KG['기타'];
+    const ingredientName = ingredient.name || 'default';
+    const unitWeightKg = INGREDIENT_WEIGHTS_KG[ingredientName] || INGREDIENT_WEIGHTS_KG.default;
     const consumedWeightKg = unitWeightKg * (ingredient.quantity || 1);
 
     // 3. [수정] 외부 API 연동 실시간 소매 시세 조회 (원/kg 단위)
-    let currentKgPrice = 5000; 
+    let currentKgPrice = 5000;
     try {
       const atUrl = `http://apis.data.go.kr/B552895/greenPrclnInfo/getGreenPrclnList?serviceKey=${API_KEY}&pageNo=1&numOfRows=3&_type=json&itemNm=${encodeURIComponent(ingredientName)}`;
       const atRes = await fetch(atUrl);
@@ -166,7 +165,7 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
       .from('ingredients')
       .update({ is_consumed: true })
       .eq('id', ingredient_id)
-      .eq('user_id', user.id); 
+      .eq('user_id', user.id);
 
     if (ingredientError) return { success: false, error: ingredientError.message };
 
@@ -174,7 +173,7 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
     const { error: logError } = await supabase
       .from('eco_savings_logs')
       .insert([
-        { saved_money: calculated_saved_money, carbon_reduced, user_id: user.id } 
+        { saved_money: calculated_saved_money, carbon_reduced, user_id: user.id }
       ]);
 
     if (logError) return { success: false, error: logError.message };
@@ -207,7 +206,7 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   })
 
   /*소비 완료 이미지 분석*/
-  .post('/consume-image', async ({ body, user }) => {
+  .post('/consume-image', async ({ body, user }: any) => {
     const { ingredient_id, image } = body;
     const API_KEY = Bun.env.FOODSAFETY_API_KEY;
 
@@ -257,11 +256,11 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
     const remaining_quantity = ingredient.quantity * remaining_ratio;
 
     // 💡 [수정] 고정 수식(* 500)을 걷어내고 실시간 수량-중량 매퍼 및 공공 시세 단가 연동
-    const ingredientName = ingredient.name || '기타';
-    const unitWeightKg = INGREDIENT_WEIGHTS_KG[ingredientName] || INGREDIENT_WEIGHTS_KG['기타'];
+    const ingredientName = ingredient.name || 'default';
+    const unitWeightKg = INGREDIENT_WEIGHTS_KG[ingredientName] || INGREDIENT_WEIGHTS_KG.default;
     const consumedWeightKg = unitWeightKg * consumed_quantity;
 
-    let currentKgPrice = 5000; 
+    let currentKgPrice = 5000;
     try {
       const atUrl = `http://apis.data.go.kr/B552895/greenPrclnInfo/getGreenPrclnList?serviceKey=${API_KEY}&pageNo=1&numOfRows=3&_type=json&itemNm=${encodeURIComponent(ingredientName)}`;
       const atRes = await fetch(atUrl);
@@ -320,7 +319,7 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   })
 
   /*캘린더 - 월별 식재료 소비기한 상태 조회*/
-  .get('/calendar', async ({ query, user }) => {
+  .get('/calendar', async ({ query, user }: any) => {
     const { month } = query; // 예: 2026-05
 
     const startDate = new Date(`${month}-01`).toISOString();
@@ -380,7 +379,7 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   })
 
   /*식재료 단건 상세 조회*/
-  .get('/:id', async ({ params, user }) => {
+  .get('/:id', async ({ params, user }: any) => {
     const { data, error } = await supabase
       .from('ingredients')
       .select('*')
