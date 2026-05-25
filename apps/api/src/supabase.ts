@@ -1,15 +1,19 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { requiredEnv } from './env';
 
-const requiredEnv = (name: string) => {
-  const value = Bun.env[name];
-  if (!value) {
-    throw new Error(`${name} is required to start the API server.`);
-  }
+let client: SupabaseClient | undefined;
 
-  return value;
+const getSupabase = () => {
+  client ??= createClient(
+    requiredEnv('SUPABASE_URL'),
+    requiredEnv('SUPABASE_ANON_KEY')
+  );
+
+  return client;
 };
 
-export const supabase = createClient(
-  requiredEnv('SUPABASE_URL'),
-  requiredEnv('SUPABASE_ANON_KEY')
-);
+export const supabase = new Proxy({} as SupabaseClient, {
+  get(_target, property, receiver) {
+    return Reflect.get(getSupabase(), property, receiver);
+  }
+});

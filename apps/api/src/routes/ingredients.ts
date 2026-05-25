@@ -2,6 +2,7 @@ import { Elysia, t } from 'elysia';
 import { supabase } from '../supabase';
 import { authMiddleware } from '../middleware/auth';
 import { getItemCode } from '../lib/itemCodes';
+import { getEnv } from '../env';
 
 const INGREDIENT_WEIGHTS_KG: Record<string, number> = {
   '\uB300\uD30C': 0.5,
@@ -11,6 +12,8 @@ const INGREDIENT_WEIGHTS_KG: Record<string, number> = {
   '\uACC4\uB780': 0.06,
   default: 0.2
 };
+
+const foodSafetyApiKey = () => getEnv('FOODSAFETY_API_KEY') ?? getEnv('INGREDIENT_API_KEY');
 
 export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   .use(authMiddleware)
@@ -71,7 +74,7 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${Bun.env.OPENROUTER_API_KEY}`,
+        'Authorization': `Bearer ${getEnv('OPENROUTER_API_KEY')}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -124,7 +127,7 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   /* 식재료 직접 수동 소비 및 실시간 시세 계산 처리 */
   .post('/consume', async ({ body, user }: any) => {
     const { ingredient_id, carbon_reduced } = body;
-    const API_KEY = Bun.env.FOODSAFETY_API_KEY;
+    const API_KEY = foodSafetyApiKey();
 
     // 1. 소비하려는 식재료 조회
     const { data: ingredient, error: findError } = await supabase
@@ -208,13 +211,13 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   /*소비 완료 이미지 분석*/
   .post('/consume-image', async ({ body, user }: any) => {
     const { ingredient_id, image } = body;
-    const API_KEY = Bun.env.FOODSAFETY_API_KEY;
+    const API_KEY = foodSafetyApiKey();
 
     // LLM Vision으로 소비량/남은 양 분석
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${Bun.env.OPENROUTER_API_KEY}`,
+        'Authorization': `Bearer ${getEnv('OPENROUTER_API_KEY')}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({

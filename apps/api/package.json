@@ -3,7 +3,10 @@
   "version": "1.0.50",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "bun run --watch src/index.ts"
+    "dev": "wrangler dev --port 3000",
+    "dev:bun": "bun run --watch src/index.ts",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit"
   },
   "dependencies": {
     "@elysiajs/cors": "^1.4.2",
@@ -13,7 +16,8 @@
     "elysia": "latest"
   },
   "devDependencies": {
-    "bun-types": "latest"
+    "bun-types": "latest",
+    "wrangler": "^4.0.0"
   },
   "module": "src/index.js"
 }

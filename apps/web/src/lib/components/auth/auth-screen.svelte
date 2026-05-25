@@ -3,6 +3,7 @@
   import { Badge } from "$lib/components/ui/badge";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
+  import { login, signup } from "$lib/api";
 
   type AuthMode = "login" | "signup";
 
@@ -30,6 +31,32 @@
           switchHref: "/signup",
         }
   );
+
+  let email = $state("");
+  let password = $state("");
+  let errorMessage = $state("");
+  let loading = $state(false);
+
+  const handleSubmit = async () => {
+    if (loading) return;
+
+    loading = true;
+    errorMessage = "";
+
+    try {
+      const session = isSignup ? await signup(email, password) : await login(email, password);
+      if (session.accessToken) {
+        window.location.href = "/";
+        return;
+      }
+
+      errorMessage = "가입 확인 메일을 확인한 뒤 로그인해 주세요.";
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : "요청을 처리하지 못했어요.";
+    } finally {
+      loading = false;
+    }
+  };
 </script>
 
 <svelte:head>
@@ -61,12 +88,12 @@
         </div>
       </div>
 
-      <form class="grid gap-3" onsubmit={(event) => event.preventDefault()}>
+      <form class="grid gap-3" onsubmit={(event) => { event.preventDefault(); void handleSubmit(); }}>
         <label class="grid gap-2">
           <span class="text-sm font-semibold text-[#3b4139]">이메일</span>
           <span class="relative">
             <Mail class="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-[#8a9088]" />
-            <Input class="h-14 rounded-2xl border-[#e6e0d6] bg-white pl-11 text-base shadow-none focus-visible:ring-[#5fb76e]/20" autocomplete="email" placeholder="you@example.com" type="email" />
+            <Input class="h-14 rounded-2xl border-[#e6e0d6] bg-white pl-11 text-base shadow-none focus-visible:ring-[#5fb76e]/20" autocomplete="email" oninput={(event) => (email = event.currentTarget.value)} placeholder="you@example.com" required type="email" value={email} />
           </span>
         </label>
 
@@ -74,7 +101,7 @@
           <span class="text-sm font-semibold text-[#3b4139]">비밀번호</span>
           <span class="relative">
             <Lock class="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-[#8a9088]" />
-            <Input class="h-14 rounded-2xl border-[#e6e0d6] bg-white pl-11 text-base shadow-none focus-visible:ring-[#5fb76e]/20" autocomplete={isSignup ? "new-password" : "current-password"} placeholder="8자 이상 입력해요" type="password" />
+            <Input class="h-14 rounded-2xl border-[#e6e0d6] bg-white pl-11 text-base shadow-none focus-visible:ring-[#5fb76e]/20" autocomplete={isSignup ? "new-password" : "current-password"} minlength={8} oninput={(event) => (password = event.currentTarget.value)} placeholder="8자 이상 입력해요" required type="password" value={password} />
           </span>
         </label>
 
@@ -91,8 +118,12 @@
           </div>
         {/if}
 
-        <Button class="mt-2 h-14 rounded-full bg-[#1d211c] text-base font-semibold text-white shadow-[0_16px_44px_rgba(29,33,28,0.2)] hover:bg-[#30382f]" type="submit">
-          {page.action}
+        {#if errorMessage}
+          <p class="rounded-2xl bg-red-50 px-4 py-3 text-sm leading-5 text-red-700">{errorMessage}</p>
+        {/if}
+
+        <Button class="mt-2 h-14 rounded-full bg-[#1d211c] text-base font-semibold text-white shadow-[0_16px_44px_rgba(29,33,28,0.2)] hover:bg-[#30382f]" disabled={loading} type="submit">
+          {loading ? "처리 중..." : page.action}
         </Button>
       </form>
 

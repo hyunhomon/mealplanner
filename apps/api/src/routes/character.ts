@@ -1,6 +1,7 @@
 import { Elysia, t } from 'elysia';
 import { supabase } from '../supabase';
 import { authMiddleware } from '../middleware/auth';
+import { getEnv } from '../env';
 
 /**
  * 캐릭터 상태 시스템
@@ -276,7 +277,7 @@ export const characterRoutes = new Elysia({ prefix: '/api/character' })
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${Bun.env.OPENROUTER_API_KEY}`,
+        'Authorization': `Bearer ${getEnv('OPENROUTER_API_KEY')}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({

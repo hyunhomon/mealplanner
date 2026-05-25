@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import {
     BarChart3,
     CalendarDays,
@@ -12,7 +12,6 @@
     LogOut,
     Menu,
     Minus,
-    Plus,
     RefreshCw,
     Search,
     Sprout,
@@ -26,6 +25,17 @@
   import { Input } from "$lib/components/ui/input";
   import { Progress } from "$lib/components/ui/progress";
   import { Sheet, SheetContent, SheetOverlay } from "$lib/components/ui/sheet";
+  import {
+    clearSession,
+    getStoredSession,
+    loadCharacter,
+    loadIngredients,
+    loadRecipeRecommendations,
+    logout,
+    rebirthCharacter,
+    submitMealPhoto,
+    type CharacterStateDto,
+  } from "$lib/api";
 
   type PageId = "greeney" | "fridge" | "recipes" | "reports";
   type GreeneyMood = "happy" | "normal" | "sad" | "dead";
@@ -64,7 +74,10 @@
   const DAILY_DECAY = 15;
   const DECAY_PER_MS = DAILY_DECAY / (24 * 60 * 60 * 1000);
   const initialHappiness = 50;
-  const isLoggedIn = true;
+  let isLoggedIn = false;
+  let sessionEmail = "";
+  let loadingRemote = false;
+  let remoteError = "";
 
   const pages: { id: PageId; label: string; description: string; icon: typeof Home }[] = [
     { id: "greeney", label: "그리니", description: "오늘의 그리니 상태를 확인해요", icon: Sprout },
@@ -76,7 +89,7 @@
   const nowIso = "2026-05-25T09:00:00.000Z";
   const userId = "user-demo";
 
-  const ingredients: IngredientView[] = [
+  let ingredients: IngredientView[] = [
     {
       id: "ing-tofu",
       userId,
@@ -183,7 +196,7 @@
     },
   ];
 
-  const recipes: RecipeView[] = [
+  let recipes: RecipeView[] = [
     {
       recipe: {
         id: "recipe-tofu-rice",
@@ -406,6 +419,19 @@
   let selectedResult: MockMealResult | null = null;
   let selectedFileName = "";
   let mounted = false;
+  let cameraOpen = false;
+  let cameraBusy = false;
+  let cameraError = "";
+  let cameraSource: "greeney" | "fridge" = "greeney";
+  let cameraStream: MediaStream | null = null;
+  let cameraVideo: HTMLVideoElement;
+  let cameraCanvas: HTMLCanvasElement;
+  let detailSheetClosing = false;
+  let detailSheetDragging = false;
+  let detailSheetDragY = 0;
+  let detailSheetStartY = 0;
+  let detailSheetLastY = 0;
+  let detailSheetLastTime = 0;
 
   $: currentPage = pages.find((page) => page.id === activePage) ?? pages[0];
   $: weekStart = addDays(weekStartOf(today), weekOffset * 7);
@@ -425,6 +451,14 @@
   $: roundedHappiness = Math.round(state.happiness);
   $: mood = getMood(state.happiness);
   $: stateLabel = mood === "happy" ? "행복" : mood === "normal" ? "보통" : mood === "sad" ? "우울" : "멈춤";
+  $: mascotSrc =
+    mood === "happy"
+      ? "/assets/mascot/happy.svg"
+      : mood === "sad"
+        ? "/assets/mascot/weak.svg"
+        : mood === "dead"
+          ? "/assets/mascot/death.svg"
+          : "/assets/mascot/default.svg";
   $: moodTitle =
     mood === "happy"
       ? "그리니는 행복해요"
@@ -433,6 +467,8 @@
         : mood === "sad"
           ? "그리니는 우울해요"
           : "그리니가 멈췄어요";
+
+  $: detailSheetStyle = `--sheet-y: ${detailSheetDragY}px; --overlay-opacity: ${Math.max(0, 1 - detailSheetDragY / 320)};`;
 
   const persist = () => {
     if (!mounted) return;
@@ -449,34 +485,188 @@
     persist();
   };
 
+  const applyCharacter = (character: CharacterStateDto) => {
+    state = {
+      happiness: clamp(character.hp),
+      isDead: character.stage === "dead" || character.hp <= 0,
+      lastUpdatedAt: character.updated_at ?? character.last_fed_at ?? new Date().toISOString(),
+      activityLog: state.activityLog,
+    };
+    persist();
+  };
+
+  const refreshRemoteData = async () => {
+    const session = getStoredSession();
+    isLoggedIn = Boolean(session);
+    sessionEmail = session?.email ?? "";
+    if (!session) return;
+
+    loadingRemote = true;
+    remoteError = "";
+
+    try {
+      const [remoteIngredients, remoteRecipes, character] = await Promise.all([
+        loadIngredients(),
+        loadRecipeRecommendations(),
+        loadCharacter(),
+      ]);
+      ingredients = remoteIngredients.length ? remoteIngredients : ingredients;
+      recipes = remoteRecipes.length ? remoteRecipes : recipes;
+      applyCharacter(character);
+    } catch (error) {
+      remoteError = error instanceof Error ? error.message : "API 데이터를 불러오지 못했어요.";
+      if (remoteError.toLowerCase().includes("unauthorized")) {
+        clearSession();
+        isLoggedIn = false;
+        sessionEmail = "";
+      }
+    } finally {
+      loadingRemote = false;
+    }
+  };
+
   const pickMockResult = (fileName: string) => {
     const seed = [...fileName].reduce((sum, char) => sum + char.charCodeAt(0), 0);
     return mockMealResults[seed % mockMealResults.length];
   };
 
-  const handleMealUpload = (event: Event) => {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file || state.isDead) return;
+  const handleMealPhoto = async (image: string, fileName: string) => {
+    if (state.isDead) return;
 
-    const result = pickMockResult(file.name);
-    selectedResult = result;
-    selectedFileName = file.name;
+    selectedFileName = fileName;
 
-    updateState({
-      ...state,
-      happiness: clamp(state.happiness + result.delta),
-      activityLog: [createLogItem(result), ...state.activityLog].slice(0, 5),
-    });
+    try {
+      const session = getStoredSession();
+      if (session) {
+        const response = await submitMealPhoto(image, selectedRecipe?.recipe.name);
+        const delta = response.hp_change ?? response.hp - state.happiness;
+        const result: MockMealResult = {
+          title: response.food_name ?? "?앹궗 ?ъ쭊 遺꾩꽍",
+          mealName: response.food_name ?? fileName,
+          comment: response.reason ?? response.message ?? "?ъ쭊 遺꾩꽍 寃곌낵瑜?諛섏쁺?덉뼱??",
+          reaction: response.status_message ?? response.message ?? "",
+          delta,
+        };
+        selectedResult = result;
+        applyCharacter(response);
+        state = { ...state, activityLog: [createLogItem(result), ...state.activityLog].slice(0, 5) };
+        persist();
+        return;
+      }
 
-    input.value = "";
+      const result = pickMockResult(fileName);
+      selectedResult = result;
+      updateState({
+        ...state,
+        happiness: clamp(state.happiness + result.delta),
+        activityLog: [createLogItem(result), ...state.activityLog].slice(0, 5),
+      });
+    } catch (error) {
+      const result = pickMockResult(fileName);
+      selectedResult = {
+        ...result,
+        comment: error instanceof Error ? error.message : result.comment,
+      };
+    }
   };
 
-  const restartGreeney = () => {
+  const stopCamera = () => {
+    cameraStream?.getTracks().forEach((track) => track.stop());
+    cameraStream = null;
+    if (cameraVideo) {
+      cameraVideo.srcObject = null;
+    }
+  };
+
+  const openCamera = async (source: "greeney" | "fridge") => {
+    if (source === "greeney" && state.isDead) return;
+
+    cameraSource = source;
+    cameraOpen = true;
+    cameraBusy = false;
+    cameraError = "";
+
+    await tick();
+    stopCamera();
+
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("이 브라우저에서는 웹캠 촬영을 사용할 수 없어요.");
+      }
+
+      cameraStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false,
+      });
+
+      await tick();
+      if (cameraVideo) {
+        cameraVideo.srcObject = cameraStream;
+        await cameraVideo.play();
+      }
+    } catch (error) {
+      cameraError = error instanceof Error ? error.message : "웹캠 권한을 가져오지 못했어요.";
+      stopCamera();
+    }
+  };
+
+  const closeCamera = () => {
+    cameraOpen = false;
+    cameraBusy = false;
+    cameraError = "";
+    stopCamera();
+  };
+
+  const captureCameraPhoto = async () => {
+    if (!cameraVideo || !cameraCanvas || cameraBusy) return;
+
+    const width = cameraVideo.videoWidth;
+    const height = cameraVideo.videoHeight;
+    if (!width || !height) {
+      cameraError = "카메라 화면이 준비되지 않았어요. 잠시 후 다시 촬영해 주세요.";
+      return;
+    }
+
+    cameraBusy = true;
+    cameraCanvas.width = width;
+    cameraCanvas.height = height;
+    cameraCanvas.getContext("2d")?.drawImage(cameraVideo, 0, 0, width, height);
+
+    const image = cameraCanvas.toDataURL("image/jpeg", 0.9).split(",")[1] ?? "";
+    const fileName = `webcam-${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
+
+    if (cameraSource === "fridge") {
+      activePage = "greeney";
+    }
+
+    try {
+      await handleMealPhoto(image, fileName);
+      closeCamera();
+    } finally {
+      cameraBusy = false;
+    }
+  };
+
+  const restartGreeney = async () => {
     selectedResult = null;
     selectedFileName = "";
+    try {
+      if (getStoredSession()) {
+        applyCharacter(await rebirthCharacter());
+        return;
+      }
+    } catch (error) {
+      remoteError = error instanceof Error ? error.message : "다시 시작하지 못했어요.";
+    }
+
     state = defaultState();
     persist();
+  };
+
+  const handleLogout = async () => {
+    await logout();
+    isLoggedIn = false;
+    sessionEmail = "";
   };
 
   const movePage = (page: PageId) => {
@@ -484,24 +674,79 @@
     menuOpen = false;
   };
 
-  const closeDetailSheet = () => {
+  const resetDetailSheetDrag = () => {
+    detailSheetDragging = false;
+    detailSheetDragY = 0;
+    detailSheetStartY = 0;
+    detailSheetLastY = 0;
+    detailSheetLastTime = 0;
+  };
+
+  const closeDetailSheet = async () => {
+    if (detailSheetClosing) return;
+
+    detailSheetClosing = true;
+    detailSheetDragging = false;
+    detailSheetDragY = Math.max(detailSheetDragY, 24);
+    await new Promise((resolve) => window.setTimeout(resolve, 190));
     selectedIngredient = null;
     selectedRecipe = null;
+    detailSheetClosing = false;
+    resetDetailSheetDrag();
+  };
+
+  const startDetailSheetDrag = (event: PointerEvent) => {
+    if (detailSheetClosing) return;
+
+    detailSheetDragging = true;
+    detailSheetStartY = event.clientY - detailSheetDragY;
+    detailSheetLastY = event.clientY;
+    detailSheetLastTime = performance.now();
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  };
+
+  const moveDetailSheetDrag = (event: PointerEvent) => {
+    if (!detailSheetDragging) return;
+
+    detailSheetDragY = Math.max(0, event.clientY - detailSheetStartY);
+    detailSheetLastY = event.clientY;
+    detailSheetLastTime = performance.now();
+  };
+
+  const endDetailSheetDrag = (event: PointerEvent) => {
+    if (!detailSheetDragging) return;
+
+    const elapsed = Math.max(1, performance.now() - detailSheetLastTime);
+    const velocity = Math.max(0, (event.clientY - detailSheetLastY) / elapsed);
+    const shouldClose = detailSheetDragY > 120 || (detailSheetDragY > 56 && velocity > 0.35);
+    detailSheetDragging = false;
+
+    if (shouldClose) {
+      void closeDetailSheet();
+    } else {
+      detailSheetDragY = 0;
+    }
   };
 
   onMount(() => {
     mounted = true;
     state = readState();
     persist();
+    void refreshRemoteData();
 
     const interval = window.setInterval(() => {
       if (state.isDead) return;
       updateState(applyDecay(state));
     }, 60_000);
 
-    return () => window.clearInterval(interval);
+    return () => {
+      window.clearInterval(interval);
+      stopCamera();
+    };
   });
 </script>
+
+<svelte:window onpointermove={moveDetailSheetDrag} onpointerup={endDetailSheetDrag} onpointercancel={endDetailSheetDrag} />
 
 <svelte:head>
   <title>greeney | Mealplanner</title>
@@ -539,18 +784,7 @@
                         <Progress class="mt-2 h-2 bg-white/15 [&>div]:bg-[#70d77d]" value={roundedHappiness} />
                       </div>
                       <div class="absolute inset-x-8 top-10 h-16 rounded-full bg-white/45 blur-2xl"></div>
-                      <div class={`greeney greeney-${mood}`} aria-label={`greeney ${stateLabel} 상태`}>
-                        <div class="greeney-stem"></div>
-                        <div class="greeney-body">
-                          <div class="greeney-eye left"></div>
-                          <div class="greeney-eye right"></div>
-                          <div class="greeney-mouth"></div>
-                        </div>
-                        <div class="greeney-arm left"></div>
-                        <div class="greeney-arm right"></div>
-                        <div class="greeney-leg left"></div>
-                        <div class="greeney-leg right"></div>
-                      </div>
+                      <img class={`greeney greeney-${mood}`} src={mascotSrc} alt={`greeney ${stateLabel} 상태`} />
                     </div>
                   </div>
                 </div>
@@ -743,24 +977,51 @@
     </div>
 
     {#if activePage === "greeney" && mood !== "dead"}
-      <label class="fixed bottom-6 left-[max(1rem,calc(50%-240px+1rem))] z-40 inline-flex h-14 cursor-pointer items-center gap-3 rounded-full bg-[#5fb76e] pl-4 pr-5 text-white shadow-[0_14px_40px_rgba(74,151,87,0.3)] transition hover:bg-[#4da25c]" aria-label="음식 촬영">
+      <button type="button" class="fixed bottom-6 left-[max(1rem,calc(50%-240px+1rem))] z-40 inline-flex h-14 cursor-pointer items-center gap-3 rounded-full bg-[#5fb76e] pl-4 pr-5 text-white shadow-[0_14px_40px_rgba(74,151,87,0.3)] transition hover:bg-[#4da25c]" aria-label="음식 촬영" onclick={() => openCamera("greeney")}>
         <span class="grid size-8 place-items-center rounded-full bg-white/18">
           <Camera class="size-5" />
         </span>
         <span class="text-sm font-semibold">음식 촬영</span>
-        <input class="sr-only" type="file" accept="image/*" onchange={handleMealUpload} />
-      </label>
+      </button>
     {:else if activePage === "fridge"}
       <button
         type="button"
-        class="fixed bottom-6 left-[max(1rem,calc(50%-240px+1rem))] z-40 inline-flex h-14 items-center gap-3 rounded-full bg-[#5fb76e] pl-4 pr-5 text-white shadow-[0_14px_40px_rgba(74,151,87,0.3)] transition hover:bg-[#4da25c]"
+        class="fixed bottom-6 left-[max(1rem,calc(50%-240px+1rem))] z-40 inline-flex h-14 cursor-pointer items-center gap-3 rounded-full bg-[#5fb76e] pl-4 pr-5 text-white shadow-[0_14px_40px_rgba(74,151,87,0.3)] transition hover:bg-[#4da25c]"
         aria-label="식재료 추가"
+        onclick={() => openCamera("fridge")}
       >
         <span class="grid size-8 place-items-center rounded-full bg-white/18">
-          <Plus class="size-5" />
+          <Camera class="size-5" />
         </span>
         <span class="text-sm font-semibold">식재료 추가</span>
       </button>
+    {/if}
+
+    {#if cameraOpen}
+      <div class="fixed inset-0 left-1/2 z-50 w-full max-w-[480px] -translate-x-1/2 overflow-hidden bg-[#10130f]" role="dialog" aria-modal="true" aria-label="웹캠 촬영">
+        <video bind:this={cameraVideo} class="h-full w-full object-cover" autoplay playsinline muted></video>
+        <canvas bind:this={cameraCanvas} class="hidden"></canvas>
+
+        {#if cameraError}
+          <div class="absolute inset-x-4 top-20 rounded-2xl bg-white p-4 text-sm font-medium leading-6 text-[#2c302b] shadow-[0_14px_40px_rgba(0,0,0,0.24)]">
+            {cameraError}
+          </div>
+        {/if}
+
+        <div class="absolute inset-x-0 top-0 flex items-center justify-between gap-3 bg-gradient-to-b from-black/55 to-transparent p-4">
+          <p class="text-sm font-semibold text-white">{cameraSource === "fridge" ? "식재료 촬영" : "음식 촬영"}</p>
+          <Button class="size-10 rounded-full bg-white/16 text-white backdrop-blur hover:bg-white/24" size="icon" aria-label="촬영 닫기" onclick={closeCamera}>
+            <X class="size-5" />
+          </Button>
+        </div>
+
+        <div class="absolute inset-x-0 bottom-0 grid justify-items-center gap-3 bg-gradient-to-t from-black/70 to-transparent p-6 pb-8">
+          <Button class="size-20 rounded-full border-4 border-white/55 bg-white text-[#1d211c] shadow-[0_14px_40px_rgba(0,0,0,0.3)] hover:bg-[#f5f3ed]" size="icon" aria-label="촬영하기" onclick={captureCameraPhoto} disabled={cameraBusy || !!cameraError}>
+            <Camera class="size-8" />
+          </Button>
+          <p class="text-xs font-medium text-white/80">{cameraBusy ? "업로드 중" : "가운데 버튼을 눌러 촬영"}</p>
+        </div>
+      </div>
     {/if}
 
     <Button
@@ -778,14 +1039,14 @@
         <div class="flex items-center justify-between gap-3">
           <div class="min-w-0">
             <p class="text-xs font-medium leading-none text-[#69716b]">{isLoggedIn ? "로그인된 계정" : "로그인되지 않았어요"}</p>
-            <p class="mt-0 truncate text-xl font-medium leading-6 tracking-normal text-[#1d211c]">{isLoggedIn ? "hyunhomon@gmail.com" : "익명의 사용자"}</p>
+            <p class="mt-0 truncate text-xl font-medium leading-6 tracking-normal text-[#1d211c]">{isLoggedIn ? sessionEmail || "로그인 계정" : "익명의 사용자"}</p>
           </div>
           {#if isLoggedIn}
-            <Button class="size-10 rounded-full bg-[#e2ded5] text-[#2c302b] hover:bg-[#d7d1c6]" size="icon" variant="secondary" aria-label="로그아웃">
+            <Button class="size-10 rounded-full bg-[#e2ded5] text-[#2c302b] hover:bg-[#d7d1c6]" size="icon" variant="secondary" aria-label="로그아웃" onclick={handleLogout}>
               <LogOut class="size-4" />
             </Button>
           {:else}
-            <Button class="rounded-full px-4" variant="secondary">로그인</Button>
+            <Button class="rounded-full px-4" href="/login" variant="secondary">로그인</Button>
           {/if}
         </div>
 
@@ -814,10 +1075,17 @@
     </Sheet>
 
     {#if selectedIngredient || selectedRecipe}
-      <div class="fixed inset-0 left-1/2 z-50 w-full max-w-[480px] -translate-x-1/2 overflow-hidden" role="dialog" aria-modal="true">
-        <button class="absolute inset-0 bg-black/24 backdrop-blur-[1px]" type="button" aria-label="상세 닫기" onclick={closeDetailSheet}></button>
-        <section class="absolute inset-x-0 bottom-0 max-h-[82vh] overflow-y-auto rounded-t-[1.75rem] bg-[#f7f6f1] p-4 pb-6 shadow-[0_-24px_70px_rgba(29,33,28,0.24)]">
-          <div class="mx-auto mb-4 h-1.5 w-12 rounded-full bg-[#d7d1c6]"></div>
+      <div class="fixed inset-0 left-1/2 z-50 w-full max-w-[480px] -translate-x-1/2 overflow-hidden" role="dialog" aria-modal="true" style={detailSheetStyle}>
+        <button class={`detail-sheet-backdrop absolute inset-0 bg-black/24 backdrop-blur-[1px] ${detailSheetClosing ? "detail-sheet-backdrop-closing" : ""}`} type="button" aria-label="상세 닫기" onclick={closeDetailSheet}></button>
+        <section class={`detail-sheet-panel absolute inset-x-0 bottom-0 max-h-[82vh] overflow-y-auto rounded-t-[1.75rem] bg-[#f7f6f1] p-4 pb-6 shadow-[0_-24px_70px_rgba(29,33,28,0.24)] ${detailSheetDragging ? "detail-sheet-dragging" : ""} ${detailSheetClosing ? "detail-sheet-closing" : ""}`}>
+          <button
+            class="detail-sheet-handle mx-auto mb-4 grid h-8 w-24 touch-none place-items-center rounded-full"
+            type="button"
+            aria-label="상세 시트 내리기"
+            onpointerdown={startDetailSheetDrag}
+          >
+            <span class="h-1.5 w-12 rounded-full bg-[#d7d1c6]"></span>
+          </button>
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
               <p class="text-sm font-semibold text-[#5d7564]">{selectedIngredient ? "식재료 상세" : "레시피 상세"}</p>
@@ -969,126 +1237,94 @@
 </main>
 
 <style>
+  .detail-sheet-backdrop {
+    opacity: var(--overlay-opacity);
+    animation: detailBackdropIn 180ms ease-out both;
+  }
+
+  .detail-sheet-backdrop-closing {
+    animation: detailBackdropOut 180ms ease-in both;
+  }
+
+  .detail-sheet-panel {
+    transform: translate3d(0, var(--sheet-y), 0);
+    animation: detailSheetIn 240ms cubic-bezier(0.2, 0.85, 0.2, 1) both;
+    will-change: transform;
+  }
+
+  .detail-sheet-panel:not(.detail-sheet-dragging):not(.detail-sheet-closing) {
+    transition: transform 220ms cubic-bezier(0.2, 0.85, 0.2, 1);
+  }
+
+  .detail-sheet-dragging {
+    animation: none;
+    transition: none;
+  }
+
+  .detail-sheet-closing {
+    animation: detailSheetOut 190ms cubic-bezier(0.4, 0, 1, 1) both;
+  }
+
+  .detail-sheet-handle {
+    cursor: grab;
+  }
+
+  .detail-sheet-handle:active {
+    cursor: grabbing;
+  }
+
+  @keyframes detailBackdropIn {
+    from {
+      opacity: 0;
+    }
+
+    to {
+      opacity: var(--overlay-opacity);
+    }
+  }
+
+  @keyframes detailBackdropOut {
+    from {
+      opacity: var(--overlay-opacity);
+    }
+
+    to {
+      opacity: 0;
+    }
+  }
+
+  @keyframes detailSheetIn {
+    from {
+      transform: translate3d(0, 100%, 0);
+    }
+
+    to {
+      transform: translate3d(0, var(--sheet-y), 0);
+    }
+  }
+
+  @keyframes detailSheetOut {
+    from {
+      transform: translate3d(0, var(--sheet-y), 0);
+    }
+
+    to {
+      transform: translate3d(0, 100%, 0);
+    }
+  }
+
   .greeney {
-    position: relative;
-    width: min(58%, 13rem);
-    height: 14.25rem;
+    width: min(70%, 15rem);
+    max-height: 14.5rem;
+    object-fit: contain;
+    filter: drop-shadow(0 18px 20px rgb(84 122 74 / 18%));
     transition:
       transform 240ms ease,
       filter 240ms ease;
   }
 
-  .greeney-body {
-    position: absolute;
-    inset: 2.6rem 1.45rem 2rem;
-    background: #d8f4a7;
-    clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
-    filter: drop-shadow(0 18px 20px rgb(84 122 74 / 18%));
-  }
-
-  .greeney-body::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
-    border: 0.28rem solid #111;
-  }
-
-  .greeney-stem,
-  .greeney-arm,
-  .greeney-leg {
-    position: absolute;
-    border-radius: 999px;
-    background: #111;
-  }
-
-  .greeney-stem {
-    right: 1.8rem;
-    top: 3.1rem;
-    width: 3.55rem;
-    height: 0.42rem;
-    transform: rotate(22deg);
-    transform-origin: left center;
-  }
-
-  .greeney-arm.left {
-    left: 2.4rem;
-    bottom: 4.55rem;
-    width: 0.42rem;
-    height: 2.75rem;
-    transform: rotate(-16deg);
-  }
-
-  .greeney-arm.right {
-    right: 2.25rem;
-    bottom: 4.6rem;
-    width: 0.42rem;
-    height: 2.8rem;
-    transform: rotate(16deg);
-  }
-
-  .greeney-leg.left,
-  .greeney-leg.right {
-    bottom: 0.7rem;
-    width: 0.42rem;
-    height: 3.15rem;
-  }
-
-  .greeney-leg.left {
-    left: 4.85rem;
-    transform: rotate(6deg);
-  }
-
-  .greeney-leg.right {
-    right: 4.85rem;
-    transform: rotate(-6deg);
-  }
-
-  .greeney-eye,
-  .greeney-mouth {
-    position: absolute;
-    z-index: 2;
-    background: #111;
-  }
-
-  .greeney-eye {
-    top: 46%;
-    width: 0.72rem;
-    height: 0.72rem;
-    border-radius: 999px;
-  }
-
-  .greeney-eye.left {
-    left: 38%;
-  }
-
-  .greeney-eye.right {
-    right: 38%;
-  }
-
-  .greeney-mouth {
-    left: 50%;
-    top: 58%;
-    width: 1.9rem;
-    height: 1rem;
-    border: 0.22rem solid #111;
-    border-top: 0;
-    border-radius: 0 0 999px 999px;
-    background: transparent;
-    transform: translateX(-50%);
-  }
-
   .greeney-happy {
     animation: floaty 2.6s ease-in-out infinite;
-  }
-
-  .greeney-happy .greeney-body {
-    background: #c9f57d;
-  }
-
-  .greeney-happy .greeney-eye {
-    height: 0.34rem;
-    border-radius: 999px;
   }
 
   .greeney-sad {
@@ -1096,36 +1332,11 @@
     transform: translateY(0.4rem) rotate(-2deg);
   }
 
-  .greeney-sad .greeney-mouth {
-    top: 62%;
-    border-top: 0.22rem solid #111;
-    border-bottom: 0;
-    border-radius: 999px 999px 0 0;
-  }
-
   .greeney-dead {
-    filter: grayscale(1);
-    opacity: 0.62;
-    transform: rotate(7deg);
-  }
-
-  .greeney-dead .greeney-eye {
-    width: 1rem;
-    height: 0.22rem;
-    border-radius: 999px;
-    transform: rotate(35deg);
-  }
-
-  .greeney-dead .greeney-eye.right {
-    transform: rotate(-35deg);
-  }
-
-  .greeney-dead .greeney-mouth {
-    width: 1.7rem;
-    height: 0.22rem;
-    border: 0;
-    border-radius: 999px;
-    background: #111;
+    width: min(76%, 16rem);
+    max-height: 15rem;
+    filter: drop-shadow(0 18px 20px rgb(84 122 74 / 14%));
+    transform: rotate(2deg);
   }
 
   @keyframes floaty {

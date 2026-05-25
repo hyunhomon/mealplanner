@@ -1,4 +1,5 @@
 import type { Recipe } from '@mealplanner/shared';
+import { getEnv } from '../env';
 
 type FoodSafetyRecipeRow = Record<string, string | undefined>;
 
@@ -102,12 +103,12 @@ export const extractIngredientNames = (ingredientText: string) => {
 };
 
 export const fetchRecipePage = async (start = 1, end = 1000) => {
-  const key = Bun.env.RECIPE_API_KEY;
+  const key = getEnv('RECIPE_API_KEY');
   if (!key) {
     throw new RecipeCatalogError('RECIPE_API_KEY is not configured');
   }
 
-  const baseUrl = (Bun.env.RECIPE_API_BASE_URL || DEFAULT_BASE_URL).replace(/\/$/, '');
+  const baseUrl = (getEnv('RECIPE_API_BASE_URL') || DEFAULT_BASE_URL).replace(/\/$/, '');
   const url = `${baseUrl}/${key}/COOKRCP01/json/${start}/${end}`;
   const response = await fetch(url);
   if (!response.ok) {

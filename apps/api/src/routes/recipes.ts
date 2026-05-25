@@ -8,6 +8,7 @@ import { recipeSchemas } from '../schemas';
 import { daysUntil } from '../lib/dates';
 import { type IngredientRow, toIngredient } from '../lib/ingredients';
 import { fail, ok } from '../lib/responses';
+import { getEnv } from '../env';
 
 const compact = (value: unknown) => String(value ?? '').trim();
 
@@ -112,7 +113,7 @@ export const recipeRoutes = new Elysia({ prefix: '/api/recipes', tags: ['Recipes
           .filter(([, name]) => Boolean(name))
       );
 
-      const scanLimit = Number(Bun.env.RECIPE_RECOMMENDATION_SCAN_LIMIT ?? 1000);
+      const scanLimit = Number(getEnv('RECIPE_RECOMMENDATION_SCAN_LIMIT') ?? 1000);
       const recipes = await fetchRecipes(1, scanLimit);
       const recommendations = recipes
         .map((recipe) => scoreRecipe(recipe, ingredients, ingredientNamesById, expiringWithinDays))

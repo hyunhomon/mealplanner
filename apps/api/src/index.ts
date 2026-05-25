@@ -7,12 +7,12 @@ import { recipeRoutes } from './routes/recipes';
 import { characterRoutes } from './routes/character';
 import { preferencesRoutes } from './routes/preferences';
 import { fail } from './lib/responses';
+import { getEnv, setEnv, type EnvBindings } from './env';
 
-const app = new Elysia()
-  .use(cors({
-    origin: [Bun.env.WEB_ORIGIN ?? 'http://localhost:5173']
-  }))
-  .use(swagger({
+const withSwagger = (app: any) => {
+  if (!globalThis.Bun) return app;
+
+  return app.use(swagger({
     path: '/swagger',
     documentation: {
       info: {
@@ -27,13 +27,27 @@ const app = new Elysia()
         { name: 'Recipes', description: 'Recipe search and recommendation endpoints' }
       ]
     }
+  }));
+};
+
+const app = withSwagger(new Elysia({ aot: false })
+  .use(cors({
+    origin: (request) => {
+      const origin = request.headers.get('origin');
+      const allowedOrigins = (getEnv('WEB_ORIGIN') ?? 'http://localhost:5173')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+
+      return Boolean(origin && allowedOrigins.includes(origin));
+    }
   }))
   .onError(({ code, error, set }) => {
     if (code === 'VALIDATION') {
       return fail(set, 400, 'VALIDATION_ERROR', 'Request validation failed.', error);
     }
 
-    if (set.status === 401) {
+    if (set.status === 401 || (error as Error & { status?: number }).status === 401) {
       return fail(set, 401, 'UNAUTHORIZED', 'Authentication is required.');
     }
 
@@ -55,7 +69,12 @@ const app = new Elysia()
   .use(ingredientRoutes)
   .use(recipeRoutes)
   .use(characterRoutes)
-  .use(preferencesRoutes)
-  .listen(3000);
+  .use(preferencesRoutes))
+  .compile();
 
-console.log(`http://localhost:3000`);
+export default {
+  fetch(request: Request, env: EnvBindings) {
+    setEnv(env);
+    return app.fetch(request);
+  }
+};
