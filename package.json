@@ -7,9 +7,14 @@
     "packages/*"
   ],
   "scripts": {
-    "dev:api": "bun --cwd apps/api dev",
-    "dev:desktop": "bun --cwd apps/desktop dev",
-    "dev": "bun run dev:api & bun run dev:desktop"
+    "dev": "bun run dev:web",
+    "dev:web": "bun run --cwd apps/web dev",
+    "build": "bun run build:web",
+    "build:web": "bun run --cwd apps/web build",
+    "preview": "bun run --cwd apps/web preview",
+    "check": "bun run --cwd apps/web check",
+    "pages:preview": "bun run --cwd apps/web pages:preview",
+    "pages:deploy": "bun run --cwd apps/web pages:deploy"
   },
   "devDependencies": {
     "@types/bun": "latest",
