@@ -1,9 +1,11 @@
+import tailwindcss from "@tailwindcss/vite";
 import { sveltekit } from "@sveltejs/kit/vite";
 import { SvelteKitPWA } from "@vite-pwa/sveltekit";
 import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [
+    tailwindcss(),
     sveltekit(),
     SvelteKitPWA({
       registerType: "autoUpdate",
@@ -22,16 +24,12 @@ export default defineConfig({
             src: "/pwa.svg",
             sizes: "any",
             type: "image/svg+xml",
-            purpose: "any maskable",
-          },
-        ],
+            purpose: "any maskable"
+          }
+        ]
       },
-      workbox: {
-        globPatterns: ["**/*.{js,css,html,ico,png,svg,webp,woff2}"],
-      },
-      devOptions: {
-        enabled: true,
-      },
-    }),
-  ],
+      workbox: { globPatterns: ["**/*.{js,css,html,ico,png,svg,webp,woff2}"] },
+      devOptions: { enabled: true }
+    })
+  ]
 });
