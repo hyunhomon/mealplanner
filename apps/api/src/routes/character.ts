@@ -57,7 +57,7 @@ export const characterRoutes = new Elysia({ prefix: '/api/character' })
   .use(authMiddleware)
 
   /*캐릭터 현재 상태 조회*/
-  .get('/', async ({ user }) => {
+  .get('/', async ({ user }: any) => {
     let { data: character, error } = await supabase
       .from('user_character')
       .select('*')
@@ -115,7 +115,7 @@ export const characterRoutes = new Elysia({ prefix: '/api/character' })
   })
 
   /*먹이 주기 (식재료 소비 시 호출)*/
-  .post('/feed', async ({ user }) => {
+  .post('/feed', async ({ user }: any) => {
     const { data: character, error } = await supabase
       .from('user_character')
       .select('*')
@@ -172,7 +172,7 @@ export const characterRoutes = new Elysia({ prefix: '/api/character' })
   })
 
   /*식재료 방치/폐기 시 HP 감소*/
-  .post('/penalty', async ({ user }) => {
+  .post('/penalty', async ({ user }: any) => {
     const { data: character, error } = await supabase
       .from('user_character')
       .select('*')
@@ -214,7 +214,7 @@ export const characterRoutes = new Elysia({ prefix: '/api/character' })
   })
 
   /*부활 - 새 알 받기 (죽은 상태에서만 가능)*/
-  .post('/rebirth', async ({ user }) => {
+  .post('/rebirth', async ({ user }: any) => {
     const { data: character, error } = await supabase
       .from('user_character')
       .select('*')
@@ -251,7 +251,7 @@ export const characterRoutes = new Elysia({ prefix: '/api/character' })
   })
 
   /*음식 사진 촬영 시 HP 회복/감소*/
-  .post('/eat-photo', async ({ body, user }) => {
+  .post('/eat-photo', async ({ body, user }: any) => {
     const { image, recommended_recipe_name } = body;
 
     const { data: character, error } = await supabase

@@ -6,7 +6,7 @@ export const preferencesRoutes = new Elysia({ prefix: '/api/preferences' })
   .use(authMiddleware)
 
   /*선호 식단 조회*/
-  .get('/', async ({ user }) => {
+  .get('/', async ({ user }: any) => {
     const { data, error } = await supabase
       .from('user_preferences')
       .select('id, user_id, health_condition, created_at')
@@ -32,7 +32,7 @@ export const preferencesRoutes = new Elysia({ prefix: '/api/preferences' })
   })
 
   /*선호 식단 수정*/
-  .post('/', async ({ body, user }) => {
+  .post('/', async ({ body, user }: any) => {
     const { health_condition } = body;
 
     const { data: existing } = await supabase
