@@ -46,10 +46,12 @@ export const recipeRoutes = new Elysia({ prefix: '/api/recipes' })
       .eq('user_id', user.id)
       .maybeSingle();
 
-    const targetCalories = prefs?.target_calories ?? 1800;
-    const targetCarbs = prefs?.target_carbs_g ?? 200;
-    const targetProtein = prefs?.target_protein_g ?? 100;
-    const targetFat = prefs?.target_fat_g ?? 50;
+    const targetCalories = 2100; // KDRIs 성인 평균 권장 칼로리
+    const targetCarbs    = 289;  // KDRIs 성인 평균 탄수화물 (g)
+    const targetProtein  = 60;   // KDRIs 성인 평균 단백질 (g)
+    const targetFat      = 58;   // KDRIs 칼로리의 25% 기준 지방 (g)
+    // 출처: 보건복지부·한국영양학회, 2020 한국인 영양소 섭취기준(KDRIs)
+    // https://www.kns.or.kr/FileRoom/FileRoom_view.asp?idx=108&BoardID=Kdr
     const healthCondition = prefs?.health_condition ?? '일반';
 
     // 1끼 기준 영양소 목표

@@ -5,6 +5,7 @@ import { ingredientRoutes } from './routes/ingredients';
 import { recipeRoutes } from './routes/recipes';
 import { reportRoutes } from './routes/reports';
 import { characterRoutes } from './routes/character';
+import { preferencesRoutes } from './routes/preferences';
 
 const app = new Elysia()
   .use(cors({
@@ -16,6 +17,7 @@ const app = new Elysia()
   .use(recipeRoutes)
   .use(reportRoutes)
   .use(characterRoutes)
+  .use(preferencesRoutes)
   .listen(3000);
 
 console.log(`http://localhost:3000`);
