@@ -6,7 +6,8 @@ export const reportRoutes = new Elysia({ prefix: '/api/reports' })
   .use(authMiddleware)
 
   /*누적 절약 수치 계산*/
-  .get('/stats', async ({ user }) => {
+  .get('/stats', async (ctx: any) => {
+    const { user } = ctx;
     const { data, error } = await supabase
       .from('eco_savings_logs')
       .select('saved_money, carbon_reduced')
@@ -25,7 +26,8 @@ export const reportRoutes = new Elysia({ prefix: '/api/reports' })
   })
 
   /*이번 달 식비 현황*/
-  .get('/monthly', async ({ query, user }) => {
+  .get('/monthly', async (ctx: any) => {
+    const { query, user } = ctx;
     const { month } = query; // 예: 2026-05
 
     const startDate = new Date(`${month}-01`).toISOString();

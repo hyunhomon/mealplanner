@@ -1,72 +1,156 @@
-import { Elysia } from 'elysia';
+import { Elysia, t } from 'elysia';
+import type { Ingredient, Recipe, RecipeRecommendation } from '@mealplanner/shared';
 import { supabase } from '../supabase';
 import { authMiddleware } from '../middleware/auth';
+import { getIngredientCatalogItem } from '../services/ingredientCatalog';
+import { fetchRecipes } from '../services/recipeCatalog';
+
+type IngredientRow = {
+  id: string;
+  user_id: string;
+  item_code: string;
+  expires_at?: string;
+  expired_at?: string;
+  total_quantity?: number;
+  quantity?: number;
+  remaining_quantity?: number;
+  created_at: string;
+  updated_at?: string;
+};
+
+const toIngredient = (row: IngredientRow): Ingredient => ({
+  id: row.id,
+  userId: row.user_id,
+  itemCode: row.item_code,
+  expiresAt: row.expires_at ?? row.expired_at ?? '',
+  totalQuantity: Number(row.total_quantity ?? row.quantity ?? 1),
+  remainingQuantity: Number(row.remaining_quantity ?? row.quantity ?? 1),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at ?? row.created_at
+});
+
+const compact = (value: unknown) => String(value ?? '').trim();
+
+const fail = (set: any, status: number, code: string, message: string, details?: unknown) => {
+  set.status = status;
+  return { success: false, error: { code, message, details } };
+};
+
+const includesKorean = (text: string, needle: string) =>
+  text.toLocaleLowerCase('ko-KR').includes(needle.toLocaleLowerCase('ko-KR'));
+
+const daysUntil = (date: string) => Math.ceil((new Date(date).getTime() - Date.now()) / 86400000);
+
+const scoreRecipe = (
+  recipe: Recipe,
+  ingredients: Ingredient[],
+  ingredientNamesById: Map<string, string>,
+  expiringWithinDays: number
+): RecipeRecommendation | undefined => {
+  const searchable = `${recipe.name}\n${recipe.ingredientText}\n${recipe.ingredientNames.join('\n')}`;
+  const matched = ingredients.filter((ingredient) => {
+    const name = ingredientNamesById.get(ingredient.id);
+    return name ? includesKorean(searchable, name) : false;
+  });
+
+  if (matched.length === 0) return undefined;
+
+  const matchedNames = matched
+    .map((ingredient) => ingredientNamesById.get(ingredient.id))
+    .filter((name): name is string => Boolean(name));
+  const missingIngredientNames = recipe.ingredientNames.filter(
+    (name) => !matchedNames.some((matchedName) => includesKorean(name, matchedName) || includesKorean(matchedName, name))
+  );
+  const matchScore = matched.length / Math.max(recipe.ingredientNames.length || matched.length, 1);
+  const expiringSoonScore = matched.filter((ingredient) => daysUntil(ingredient.expiresAt) <= expiringWithinDays).length / matched.length;
+  const score = matchScore * 0.8 + expiringSoonScore * 0.2;
+
+  return {
+    recipe,
+    matchedIngredientIds: matched.map((ingredient) => ingredient.id),
+    matchedIngredientNames: [...new Set(matchedNames)],
+    missingIngredientNames,
+    matchScore,
+    expiringSoonScore,
+    score
+  };
+};
 
 export const recipeRoutes = new Elysia({ prefix: '/api/recipes' })
   .use(authMiddleware)
 
-  /*유통기한 임박 재료 기반 레시피 추천*/
-  .get('/recommend', async ({ user }) => {
-    // 유통기한 임박 재료 조회 (본인 식재료만)
-    const { data: ingredients, error } = await supabase
+  .get('/', async ({ query, set }) => {
+    try {
+      const page = Number(query.page ?? 1);
+      const pageSize = Number(query.pageSize ?? 50);
+      const start = (page - 1) * pageSize + 1;
+      const recipes = await fetchRecipes(start, start + pageSize - 1);
+      return {
+        success: true,
+        data: {
+          items: recipes,
+          page,
+          pageSize,
+          totalCount: recipes.length
+        }
+      };
+    } catch (error) {
+      return fail(set, 502, 'RECIPE_API_ERROR', 'Failed to fetch recipes.', error);
+    }
+  }, {
+    query: t.Object({
+      page: t.Optional(t.Numeric()),
+      pageSize: t.Optional(t.Numeric())
+    })
+  })
+
+  .get('/recommend', async (ctx: any) => {
+    const { query, user, set } = ctx;
+    const limit = Number(query.limit ?? 10);
+    const maxMissingIngredients = Number(query.maxMissingIngredients ?? 8);
+    const expiringWithinDays = Number(query.expiringWithinDays ?? 3);
+
+    const { data, error } = await supabase
       .from('ingredients')
       .select('*')
-      .eq('is_consumed', false)
-      .eq('user_id', user.id) // 본인 식재료만 조회
-      .order('expired_at', { ascending: true })
-      .limit(5);
-
-    if (error) return { success: false, error: error.message };
-    if (!ingredients || ingredients.length === 0)
-      return { success: true, data: [] };
-
-    const ingredientList = ingredients.map(i => i.name).join(', ');
-
-    // user_preferences 테이블에서 선호 식단 꺼내기
-    const { data: preferenceData } = await supabase
-      .from('user_preferences')
-      .select('health_condition')
       .eq('user_id', user.id)
-      .maybeSingle();
+      .eq('is_consumed', false)
+      .order('expired_at', { ascending: true });
 
-    const userDiet = preferenceData?.health_condition || '일반';
+    if (error) return fail(set, 500, 'INGREDIENT_LIST_FAILED', error.message);
 
-    let dietPrompt = '';
-    switch (userDiet) {
-      case '비건':
-        dietPrompt = `사용자의 식단 선호도가 [비건]이므로, 고기, 생선, 우유, 달걀 등 모든 동물성 재료를 완전히 제외한 100% 식물성 비건 레시피로만 구성해줘.`;
-        break;
-      case '다이어트':
-        dietPrompt = `사용자의 식단 선호도가 [다이어트/체중감량]이므로, 칼로리가 낮고 단백질 비율이 높은 헬스 식단 위주로 구성해줘.`;
-        break;
-      case '저염식':
-        dietPrompt = `사용자의 식단 선호도가 [저염식]이므로, 소금이나 간장 사용을 최소화한 싱겁고 담백한 건강식 레시피로 구성해줘.`;
-        break;
-      default:
-        dietPrompt = `가장 대중적이고 맛있는 일반 레시피로 구성해줘.`;
+    const ingredients = ((data ?? []) as IngredientRow[]).map(toIngredient);
+    if (ingredients.length === 0) return { success: true, data: [] };
+
+    try {
+      const catalogItems = await Promise.all(
+        ingredients.map(async (ingredient) => ({
+          ingredient,
+          item: await getIngredientCatalogItem(ingredient.itemCode)
+        }))
+      );
+      const ingredientNamesById = new Map(
+        catalogItems
+          .map(({ ingredient, item }) => [ingredient.id, compact(item?.name)] as const)
+          .filter(([, name]) => Boolean(name))
+      );
+
+      const recipes = await fetchRecipes(1, Number(Bun.env.RECIPE_RECOMMENDATION_SCAN_LIMIT ?? 1000));
+      const recommendations = recipes
+        .map((recipe) => scoreRecipe(recipe, ingredients, ingredientNamesById, expiringWithinDays))
+        .filter((item): item is RecipeRecommendation => Boolean(item))
+        .filter((item) => item.missingIngredientNames.length <= maxMissingIngredients)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit);
+
+      return { success: true, data: recommendations };
+    } catch (error) {
+      return fail(set, 502, 'RECIPE_API_ERROR', 'Failed to recommend recipes.', error);
     }
-
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${Bun.env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-flash-1.5',
-        messages: [
-          {
-            role: 'user',
-            content: `다음 재료로 만들 수 있는 레시피 3개를 JSON 배열로만 반환해줘. ${dietPrompt} 예시: [{"name":"두부김치","ingredients":["두부","김치"],"steps":["1. 두부를 썬다","2. 볶는다"]}]\n재료: ${ingredientList}`
-          }
-        ]
-      })
-    });
-
-    const result = await response.json();
-    // LLM이 마크다운으로 감싸서 반환할 경우 제거 후 파싱
-    const cleaned = result.choices[0].message.content.replace(/```json|```/g, '').trim();
-    const recipes = JSON.parse(cleaned);
-
-    return { success: true, data: recipes };
+  }, {
+    query: t.Object({
+      limit: t.Optional(t.Numeric()),
+      maxMissingIngredients: t.Optional(t.Numeric()),
+      expiringWithinDays: t.Optional(t.Numeric())
+    })
   });

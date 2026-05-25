@@ -1,257 +1,222 @@
 import { Elysia, t } from 'elysia';
+import type { CreateIngredientDto, Ingredient, IngredientSummary } from '@mealplanner/shared';
 import { supabase } from '../supabase';
 import { authMiddleware } from '../middleware/auth';
+import { fetchIngredientCatalog, getIngredientCatalogItem } from '../services/ingredientCatalog';
+
+type IngredientRow = {
+  id: string;
+  user_id: string;
+  item_code: string;
+  expires_at?: string;
+  expired_at?: string;
+  total_quantity?: number;
+  quantity?: number;
+  remaining_quantity?: number;
+  is_consumed?: boolean;
+  created_at: string;
+  updated_at?: string;
+};
+
+const toIngredient = (row: IngredientRow): Ingredient => {
+  const totalQuantity = Number(row.total_quantity ?? row.quantity ?? 1);
+  const remainingQuantity = Number(row.remaining_quantity ?? (row.is_consumed ? 0 : totalQuantity));
+
+  return {
+    id: row.id,
+    userId: row.user_id,
+    itemCode: row.item_code,
+    expiresAt: row.expires_at ?? row.expired_at ?? '',
+    totalQuantity,
+    remainingQuantity,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at ?? row.created_at
+  };
+};
+
+const withCatalog = async (ingredient: Ingredient): Promise<IngredientSummary> => ({
+  ...ingredient,
+  item: await getIngredientCatalogItem(ingredient.itemCode)
+});
+
+const fail = (set: any, status: number, code: string, message: string, details?: unknown) => {
+  set.status = status;
+  return { success: false, error: { code, message, details } };
+};
+
+const validateQuantity = (set: any, value: number) => {
+  if (value < 0) {
+    return fail(set, 400, 'INVALID_QUANTITY', 'Quantity must be greater than or equal to 0.');
+  }
+};
 
 export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   .use(authMiddleware)
 
-  /*미소비 식재료 목록 조회*/
-  .get('/', async ({ user }) => {
-    const { data, error } = await supabase
-      .from('ingredients')
-      .select('*')
-      .eq('is_consumed', false)
-      .eq('user_id', user.id) // 본인 식재료만 조회
-      .order('expired_at', { ascending: true });
+  .get('/catalog', async ({ query, set }) => {
+    try {
+      const page = await fetchIngredientCatalog({
+        query: query.query,
+        itemCode: query.itemCode,
+        page: query.page ? Number(query.page) : undefined,
+        pageSize: query.pageSize ? Number(query.pageSize) : undefined
+      });
 
-    if (error) return { success: false, error: error.message };
-    return { success: true, data };
+      return { success: true, data: page };
+    } catch (error) {
+      return fail(set, 502, 'INGREDIENT_API_ERROR', 'Failed to fetch ingredient catalog.', error);
+    }
+  }, {
+    query: t.Object({
+      query: t.Optional(t.String()),
+      itemCode: t.Optional(t.String()),
+      page: t.Optional(t.Numeric()),
+      pageSize: t.Optional(t.Numeric())
+    })
   })
 
-  /*식재료 수동 등록 (슬라이더 양 입력)*/
-  .post('/', async ({ body, user, set }) => {
-    const { name, quantity, expired_at } = body;
-
-    // 음수 방지
-    if (quantity < 0.1) {
-      set.status = 400;
-      return { success: false, error: '수량은 0.1 이상이어야 해요.' };
+  .get('/catalog/:itemCode', async ({ params, set }) => {
+    try {
+      const item = await getIngredientCatalogItem(params.itemCode);
+      if (!item) return fail(set, 404, 'CATALOG_ITEM_NOT_FOUND', 'Ingredient catalog item not found.');
+      return { success: true, data: item };
+    } catch (error) {
+      return fail(set, 502, 'INGREDIENT_API_ERROR', 'Failed to fetch ingredient catalog item.', error);
     }
+  })
+
+  .get('/', async (ctx: any) => {
+    const { query, user, set } = ctx;
+    const includeCatalog = query.includeCatalog === 'true';
+    let request = supabase
+      .from('ingredients')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('is_consumed', false)
+      .order('expired_at', { ascending: true });
+
+    if (query.expiringBefore) {
+      request = request.lte('expired_at', query.expiringBefore);
+    }
+
+    const { data, error } = await request;
+    if (error) return fail(set, 500, 'INGREDIENT_LIST_FAILED', error.message);
+
+    const ingredients = ((data ?? []) as IngredientRow[]).map(toIngredient);
+    const result = includeCatalog
+      ? await Promise.all(ingredients.map(withCatalog))
+      : ingredients;
+
+    return { success: true, data: result };
+  }, {
+    query: t.Object({
+      includeCatalog: t.Optional(t.String()),
+      expiringBefore: t.Optional(t.String())
+    })
+  })
+
+  .post('/', async (ctx: any) => {
+    const { body, user, set } = ctx;
+    const dto = body as CreateIngredientDto;
+    const remainingQuantity = dto.remainingQuantity ?? dto.totalQuantity;
+    const quantityError = validateQuantity(set, dto.totalQuantity) ?? validateQuantity(set, remainingQuantity);
+    if (quantityError) return quantityError;
 
     const { data, error } = await supabase
       .from('ingredients')
       .insert([{
-        name,
-        quantity,
-        expired_at,
-        is_consumed: false,
+        item_code: dto.itemCode,
+        expired_at: dto.expiresAt,
+        quantity: dto.totalQuantity,
+        remaining_quantity: remainingQuantity,
+        is_consumed: remainingQuantity <= 0,
         user_id: user.id
       }])
-      .select();
-
-    if (error) return { success: false, error: error.message };
-    return { success: true, data };
-  }, {
-    body: t.Object({
-      name: t.String(),
-      quantity: t.Number({ minimum: 0.1 }),
-      expired_at: t.String()
-    })
-  })
-
-  /*영수증 OCR 및 음성 데이터 텍스트 인식*/
-  .post('/parse-scan', async ({ body, user }) => {
-    const { type, payload } = body;
-
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${Bun.env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-flash-1.5',
-        messages: [
-          {
-            role: 'user',
-            content: type === 'OCR'
-              ? `영수증 내용에서 식품명과 표준 소비기한(일수)을 JSON 배열로만 반환해줘. 예시: [{"name":"두부","expiryDays":3}]\n${payload}`
-              : `다음 텍스트에서 식품명과 표준 소비기한(일수)을 JSON 배열로만 반환해줘. 예시: [{"name":"두부","expiryDays":3}]\n${payload}`
-          }
-        ]
-      })
-    });
-
-    const result = await response.json();
-    // LLM이 마크다운으로 감싸서 반환할 경우 제거 후 파싱
-    const cleaned = result.choices[0].message.content.replace(/```json|```/g, '').trim();
-    const ingredients = JSON.parse(cleaned);
-
-    // DB에 저장 (본인 user_id 포함, 기본 수량 1)
-    const rows = ingredients.map((item: { name: string; expiryDays: number }) => ({
-      name: item.name,
-      quantity: 1, // 영수증/음성 입력 시 기본값
-      expired_at: new Date(Date.now() + item.expiryDays * 86400000).toISOString(),
-      is_consumed: false,
-      user_id: user.id // 본인 식재료로 저장
-    }));
-
-    const { data, error } = await supabase
-      .from('ingredients')
-      .insert(rows)
-      .select();
-
-    if (error) return { success: false, error: error.message };
-    return { success: true, data };
-  }, {
-    body: t.Object({
-      type: t.String({ enum: ['OCR', 'VOICE'] }),
-      payload: t.String()
-    })
-  })
-
-  /*식재료 소비 및 환경절약 처리*/
-  .post('/consume', async ({ body, user }) => {
-    const { ingredient_id, saved_money, carbon_reduced } = body;
-
-    // 식재료 소비 상태 (본인 식재료만 소비 처리)
-    const { error: ingredientError } = await supabase
-      .from('ingredients')
-      .update({ is_consumed: true })
-      .eq('id', ingredient_id)
-      .eq('user_id', user.id); // 본인 식재료만 소비 처리
-
-    if (ingredientError) return { success: false, error: ingredientError.message };
-
-    // 에코 절약 통계
-    const { error: logError } = await supabase
-      .from('eco_savings_logs')
-      .insert([
-        { saved_money, carbon_reduced, user_id: user.id } // 본인 로그로 저장
-      ]);
-
-    if (logError) return { success: false, error: logError.message };
-
-    return { success: true, message: 'Success' };
-  }, {
-    body: t.Object({
-      ingredient_id: t.String(),
-      saved_money: t.Number(),
-      carbon_reduced: t.Number()
-    })
-  })
-
-  /*소비 완료 이미지 분석*/
-  .post('/consume-image', async ({ body, user }) => {
-    const { ingredient_id, image } = body;
-
-    // LLM Vision으로 소비량/남은 양 분석
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${Bun.env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-flash-1.5',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'image_url',
-                image_url: { url: `data:image/jpeg;base64,${image}` }
-              },
-              {
-                type: 'text',
-                text: '이 요리 사진을 보고 소비된 양(0~1 사이 비율)과 남은 양(0~1 사이 비율)을 JSON으로만 반환해줘. 예시: {"consumed_ratio":0.7,"remaining_ratio":0.3}'
-              }
-            ]
-          }
-        ]
-      })
-    });
-
-    const result = await response.json();
-    // LLM이 마크다운으로 감싸서 반환할 경우 제거 후 파싱
-    const cleaned = result.choices[0].message.content.replace(/```json|```/g, '').trim();
-    const { consumed_ratio, remaining_ratio } = JSON.parse(cleaned);
-
-    // 현재 식재료 조회
-    const { data: ingredient, error: fetchError } = await supabase
-      .from('ingredients')
-      .select('quantity')
-      .eq('id', ingredient_id)
-      .eq('user_id', user.id) // 본인 식재료만
+      .select()
       .single();
 
-    if (fetchError) return { success: false, error: fetchError.message };
-
-    const consumed_quantity = ingredient.quantity * consumed_ratio;
-    const remaining_quantity = ingredient.quantity * remaining_ratio;
-
-    // 절약 비용 계산 (소비량 기준 100g당 500원 가정)
-    const saved_money = Math.round(consumed_quantity * 500);
-
-    // 탄소 절감량 계산 (소비량 기준 1g당 0.0025kg CO₂)
-    const carbon_reduced = consumed_quantity * 0.0025;
-
-    // 식재료 상태 업데이트
-    const { error: updateError } = await supabase
-      .from('ingredients')
-      .update({
-        remaining_quantity,
-        is_consumed: remaining_quantity < 0.1 // 거의 없으면 소비 완료
-      })
-      .eq('id', ingredient_id)
-      .eq('user_id', user.id); // 본인 식재료만
-
-    if (updateError) return { success: false, error: updateError.message };
-
-    // 에코 절약 통계 저장
-    const { error: logError } = await supabase
-      .from('eco_savings_logs')
-      .insert([
-        { saved_money, carbon_reduced, user_id: user.id }
-      ]);
-
-    if (logError) return { success: false, error: logError.message };
-
-    return {
-      success: true,
-      data: {
-        consumed_quantity,   // 소비된 양
-        remaining_quantity,  // 남은 양
-        saved_money,         // 절약 비용
-        carbon_reduced       // 탄소 절감량
-      }
-    };
+    if (error) return fail(set, 500, 'INGREDIENT_CREATE_FAILED', error.message);
+    return { success: true, data: toIngredient(data as IngredientRow) };
   }, {
     body: t.Object({
-      ingredient_id: t.String(),
-      image: t.String() // base64 인코딩된 이미지
+      itemCode: t.String(),
+      expiresAt: t.String(),
+      totalQuantity: t.Number({ minimum: 0 }),
+      remainingQuantity: t.Optional(t.Number({ minimum: 0 }))
     })
   })
 
-  /*캘린더 - 월별 식재료 소비기한 상태 조회*/
-  .get('/calendar', async ({ query, user }) => {
-    const { month } = query; // 예: 2026-05
-
-    const startDate = new Date(`${month}-01`).toISOString();
-    const endDate = new Date(new Date(`${month}-01`).setMonth(
-      new Date(`${month}-01`).getMonth() + 1
-    )).toISOString();
+  .patch('/:id', async (ctx: any) => {
+    const { params, body, user, set } = ctx;
+    const patch: Record<string, unknown> = {};
+    if (body.expiresAt !== undefined) patch.expired_at = body.expiresAt;
+    if (body.totalQuantity !== undefined) patch.quantity = body.totalQuantity;
+    if (body.remainingQuantity !== undefined) patch.remaining_quantity = body.remainingQuantity;
+    if (body.remainingQuantity !== undefined) patch.is_consumed = body.remainingQuantity <= 0;
 
     const { data, error } = await supabase
       .from('ingredients')
-      .select('name, expired_at, is_consumed')
-      .eq('user_id', user.id) // 본인 식재료만 조회
+      .update(patch)
+      .eq('id', params.id)
+      .eq('user_id', user.id)
+      .select()
+      .single();
+
+    if (error) return fail(set, 500, 'INGREDIENT_UPDATE_FAILED', error.message);
+    return { success: true, data: toIngredient(data as IngredientRow) };
+  }, {
+    body: t.Object({
+      expiresAt: t.Optional(t.String()),
+      totalQuantity: t.Optional(t.Number({ minimum: 0 })),
+      remainingQuantity: t.Optional(t.Number({ minimum: 0 }))
+    })
+  })
+
+  .post('/:id/consume', async (ctx: any) => {
+    const { params, body, user, set } = ctx;
+    const { data, error } = await supabase
+      .from('ingredients')
+      .update({
+        remaining_quantity: body.remainingQuantity,
+        is_consumed: body.remainingQuantity <= 0
+      })
+      .eq('id', params.id)
+      .eq('user_id', user.id)
+      .select()
+      .single();
+
+    if (error) return fail(set, 500, 'INGREDIENT_CONSUME_FAILED', error.message);
+    return { success: true, data: toIngredient(data as IngredientRow) };
+  }, {
+    body: t.Object({
+      remainingQuantity: t.Number({ minimum: 0 })
+    })
+  })
+
+  .get('/calendar', async (ctx: any) => {
+    const { query, user, set } = ctx;
+    const startDate = new Date(`${query.month}-01`).toISOString();
+    const end = new Date(`${query.month}-01`);
+    end.setMonth(end.getMonth() + 1);
+
+    const { data, error } = await supabase
+      .from('ingredients')
+      .select('*')
+      .eq('user_id', user.id)
       .gte('expired_at', startDate)
-      .lt('expired_at', endDate)
+      .lt('expired_at', end.toISOString())
       .order('expired_at', { ascending: true });
 
-    if (error) return { success: false, error: error.message };
+    if (error) return fail(set, 500, 'INGREDIENT_CALENDAR_FAILED', error.message);
 
-    // 날짜별로 상태 분류
-    const calendar = data.map(item => {
-      const daysLeft = Math.ceil(
-        (new Date(item.expired_at).getTime() - Date.now()) / 86400000
-      );
+    const calendar = ((data ?? []) as IngredientRow[]).map((row) => {
+      const ingredient = toIngredient(row);
+      const daysLeft = Math.ceil((new Date(ingredient.expiresAt).getTime() - Date.now()) / 86400000);
       return {
-        name: item.name,
-        expired_at: item.expired_at,
-        is_consumed: item.is_consumed,
-        // 2일 이내: 빨강, 7일 이내: 노랑, 그 이상: 초록
+        id: ingredient.id,
+        itemCode: ingredient.itemCode,
+        expiresAt: ingredient.expiresAt,
+        remainingQuantity: ingredient.remainingQuantity,
         status: daysLeft <= 2 ? 'red' : daysLeft <= 7 ? 'yellow' : 'green'
       };
     });
@@ -259,15 +224,12 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
     return { success: true, data: calendar };
   }, {
     query: t.Object({
-      month: t.String() // 2026-05 형식
+      month: t.String()
     })
   })
 
-  /*부족 재료 마켓 링크 생성*/
   .get('/shop-links', async ({ query }) => {
-    const { name } = query;
-    const encoded = encodeURIComponent(name);
-
+    const encoded = encodeURIComponent(query.name);
     return {
       success: true,
       data: {
@@ -283,15 +245,22 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
     })
   })
 
-  /*식재료 단건 상세 조회*/
-  .get('/:id', async ({ params, user }) => {
+  .get('/:id', async (ctx: any) => {
+    const { params, query, user, set } = ctx;
     const { data, error } = await supabase
       .from('ingredients')
       .select('*')
       .eq('id', params.id)
-      .eq('user_id', user.id) // 본인 식재료만 조회
+      .eq('user_id', user.id)
       .single();
 
-    if (error) return { success: false, error: error.message };
-    return { success: true, data };
+    if (error) return fail(set, 404, 'INGREDIENT_NOT_FOUND', error.message);
+
+    const ingredient = toIngredient(data as IngredientRow);
+    const result = query.includeCatalog === 'true' ? await withCatalog(ingredient) : ingredient;
+    return { success: true, data: result };
+  }, {
+    query: t.Object({
+      includeCatalog: t.Optional(t.String())
+    })
   });
