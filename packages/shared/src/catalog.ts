@@ -7,6 +7,12 @@ export interface IngredientCatalogItem {
   category?: string;
   unit?: string;
   unitSize?: string;
+  grade?: string;
+  market?: string;
+  region?: string;
+  surveyedAt?: string;
+  price?: number;
+  convertedPrice?: number;
 }
 
 export interface IngredientCatalogSearchParams {
