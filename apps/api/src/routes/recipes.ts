@@ -1,18 +1,37 @@
-import { Elysia } from 'elysia';
+import { Elysia, t } from 'elysia';
 import { supabase } from '../supabase';
 import { authMiddleware } from '../middleware/auth';
+
+// 식품안전처 COOKRCP01 API 호출
+const fetchRecipesByIngredient = async (ingredientName: string, start = 1, end = 100) => {
+  const key = Bun.env.FOODSAFETY_API_KEY;
+  const url = `http://openapi.foodsafetykorea.go.kr/api/${key}/COOKRCP01/json/${start}/${end}/RCP_PARTS_DTLS=${encodeURIComponent(ingredientName)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  return data?.COOKRCP01?.row || [];
+};
+
+// 조리 순서 파싱 (MANUAL01~20)
+const parseManuals = (row: any): string[] => {
+  const steps: string[] = [];
+  for (let i = 1; i <= 20; i++) {
+    const key = `MANUAL${String(i).padStart(2, '0')}`;
+    if (row[key] && row[key].trim()) steps.push(row[key].trim());
+  }
+  return steps;
+};
 
 export const recipeRoutes = new Elysia({ prefix: '/api/recipes' })
   .use(authMiddleware)
 
-  /*유통기한 임박 재료 기반 레시피 추천*/
+  /*유통기한 임박 재료 기반 레시피 추천 (식품안전처 API)*/
   .get('/recommend', async ({ user }) => {
     // 유통기한 임박 재료 조회 (본인 식재료만)
     const { data: ingredients, error } = await supabase
       .from('ingredients')
       .select('*')
       .eq('is_consumed', false)
-      .eq('user_id', user.id) // 본인 식재료만 조회
+      .eq('user_id', user.id)
       .order('expired_at', { ascending: true })
       .limit(5);
 
@@ -20,53 +39,155 @@ export const recipeRoutes = new Elysia({ prefix: '/api/recipes' })
     if (!ingredients || ingredients.length === 0)
       return { success: true, data: [] };
 
-    const ingredientList = ingredients.map(i => i.name).join(', ');
-
-    // user_preferences 테이블에서 선호 식단 꺼내기
-    const { data: preferenceData } = await supabase
+    // 사용자 선호 식단 조회
+    const { data: prefs } = await supabase
       .from('user_preferences')
-      .select('health_condition')
+      .select('*')
       .eq('user_id', user.id)
       .maybeSingle();
 
-    const userDiet = preferenceData?.health_condition || '일반';
+    const targetCalories = prefs?.target_calories ?? 1800;
+    const targetCarbs = prefs?.target_carbs_g ?? 200;
+    const targetProtein = prefs?.target_protein_g ?? 100;
+    const targetFat = prefs?.target_fat_g ?? 50;
+    const healthCondition = prefs?.health_condition ?? '일반';
 
-    let dietPrompt = '';
-    switch (userDiet) {
-      case '비건':
-        dietPrompt = `사용자의 식단 선호도가 [비건]이므로, 고기, 생선, 우유, 달걀 등 모든 동물성 재료를 완전히 제외한 100% 식물성 비건 레시피로만 구성해줘.`;
-        break;
-      case '다이어트':
-        dietPrompt = `사용자의 식단 선호도가 [다이어트/체중감량]이므로, 칼로리가 낮고 단백질 비율이 높은 헬스 식단 위주로 구성해줘.`;
-        break;
-      case '저염식':
-        dietPrompt = `사용자의 식단 선호도가 [저염식]이므로, 소금이나 간장 사용을 최소화한 싱겁고 담백한 건강식 레시피로 구성해줘.`;
-        break;
-      default:
-        dietPrompt = `가장 대중적이고 맛있는 일반 레시피로 구성해줘.`;
+    // 1끼 기준 영양소 목표
+    const mealCalories = Math.round(targetCalories / 3);
+    const mealCarbs = Math.round(targetCarbs / 3);
+    const mealProtein = Math.round(targetProtein / 3);
+    const mealFat = Math.round(targetFat / 3);
+
+    // 재료별 레시피 검색 (유통기한 임박 순)
+    const allRecipes: any[] = [];
+    for (const ingredient of ingredients) {
+      const rows = await fetchRecipesByIngredient(ingredient.name);
+      allRecipes.push(...rows);
     }
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${Bun.env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-flash-1.5',
-        messages: [
-          {
-            role: 'user',
-            content: `다음 재료로 만들 수 있는 레시피 3개를 JSON 배열로만 반환해줘. ${dietPrompt} 예시: [{"name":"두부김치","ingredients":["두부","김치"],"steps":["1. 두부를 썬다","2. 볶는다"]}]\n재료: ${ingredientList}`
-          }
-        ]
-      })
+    // 중복 제거
+    const uniqueRecipes = Array.from(
+      new Map(allRecipes.map(r => [r.RCP_SEQ, r])).values()
+    );
+
+    // 영양소 범위 필터링
+    // 출처: 보건복지부·한국영양학회, 2020 한국인 영양소 섭취기준(KDRIs)
+    // https://www.kns.or.kr/FileRoom/FileRoom_view.asp?idx=108&BoardID=Kdr
+    const filtered = uniqueRecipes.filter(r => {
+      const cal = Number(r.INFO_ENG) || 0;
+      const car = Number(r.INFO_CAR) || 0;
+      const pro = Number(r.INFO_PRO) || 0;
+      const fat = Number(r.INFO_FAT) || 0;
+
+      // 칼로리 ±20% 허용 (KDRIs 권고 허용 오차)
+      if (cal > 0 && (cal < mealCalories * 0.8 || cal > mealCalories * 1.2)) return false;
+
+      // 탄수화물 목표치 120% 이하 (KDRIs)
+      if (car > 0 && car > mealCarbs * 1.2) return false;
+
+      // 단백질 목표치 80% 이상 (KDRIs 권장섭취량)
+      if (pro > 0 && pro < mealProtein * 0.8) return false;
+
+      // 지방 목표치 120% 이하 (KDRIs)
+      if (fat > 0 && fat > mealFat * 1.2) return false;
+
+      // 비건: 축산물/수산물 재료 포함 제외
+      if (healthCondition === '비건') {
+        const parts = r.RCP_PARTS_DTLS?.toLowerCase() || '';
+        const animalKeywords = ['고기', '소고기', '돼지', '닭', '육류', '새우', '생선', '달걀', '계란', '우유', '버터', '치즈'];
+        if (animalKeywords.some(k => parts.includes(k))) return false;
+      }
+
+      // 저염식: 나트륨 667mg 이하 (KDRIs 1일 2,000mg ÷ 3끼)
+      if (healthCondition === '저염식') {
+        const na = Number(r.INFO_NA) || 0;
+        if (na > 667) return false;
+      }
+
+      // 다이어트: 단백질 목표치 80% 이상, 칼로리 목표치 이하
+      if (healthCondition === '다이어트') {
+        if (pro > 0 && pro < mealProtein * 0.8) return false;
+        if (cal > mealCalories) return false;
+      }
+
+      return true;
     });
 
-    const result = await response.json();
-    // LLM이 마크다운으로 감싸서 반환할 경우 제거 후 파싱
-    const cleaned = result.choices[0].message.content.replace(/```json|```/g, '').trim();
-    const recipes = JSON.parse(cleaned);
+    // 칼로리 기준 정렬 후 상위 3개
+    const sorted = filtered
+      .sort((a, b) => {
+        const aCal = Math.abs(Number(a.INFO_ENG) - mealCalories);
+        const bCal = Math.abs(Number(b.INFO_ENG) - mealCalories);
+        return aCal - bCal;
+      })
+      .slice(0, 3);
 
-    return { success: true, data: recipes };
+    // 응답 포맷 정리
+    const result = sorted.map(r => ({
+      name: r.RCP_NM,
+      category: r.RCP_PAT2,
+      method: r.RCP_WAY2,
+      ingredients: r.RCP_PARTS_DTLS,
+      steps: parseManuals(r),
+      image: r.ATT_FILE_NO_MAIN || null,
+      nutrition: {
+        calories: Number(r.INFO_ENG) || 0,
+        carbs_g: Number(r.INFO_CAR) || 0,
+        protein_g: Number(r.INFO_PRO) || 0,
+        fat_g: Number(r.INFO_FAT) || 0,
+        sodium_mg: Number(r.INFO_NA) || 0
+      }
+    }));
+
+    // 필터링 결과 없으면 전체에서 상위 3개 반환
+    if (result.length === 0) {
+      const fallback = uniqueRecipes.slice(0, 3).map(r => ({
+        name: r.RCP_NM,
+        category: r.RCP_PAT2,
+        method: r.RCP_WAY2,
+        ingredients: r.RCP_PARTS_DTLS,
+        steps: parseManuals(r),
+        image: r.ATT_FILE_NO_MAIN || null,
+        nutrition: {
+          calories: Number(r.INFO_ENG) || 0,
+          carbs_g: Number(r.INFO_CAR) || 0,
+          protein_g: Number(r.INFO_PRO) || 0,
+          fat_g: Number(r.INFO_FAT) || 0,
+          sodium_mg: Number(r.INFO_NA) || 0
+        }
+      }));
+      return { success: true, data: fallback, filtered: false };
+    }
+
+    return { success: true, data: result, filtered: true };
+  })
+
+  /*레시피 검색 (재료명으로 직접 검색)*/
+  .get('/search', async ({ query }) => {
+    const { name, start, end } = query;
+    const rows = await fetchRecipesByIngredient(name, Number(start) || 1, Number(end) || 10);
+
+    const result = rows.map((r: any) => ({
+      name: r.RCP_NM,
+      category: r.RCP_PAT2,
+      method: r.RCP_WAY2,
+      ingredients: r.RCP_PARTS_DTLS,
+      steps: parseManuals(r),
+      image: r.ATT_FILE_NO_MAIN || null,
+      nutrition: {
+        calories: Number(r.INFO_ENG) || 0,
+        carbs_g: Number(r.INFO_CAR) || 0,
+        protein_g: Number(r.INFO_PRO) || 0,
+        fat_g: Number(r.INFO_FAT) || 0,
+        sodium_mg: Number(r.INFO_NA) || 0
+      }
+    }));
+
+    return { success: true, count: result.length, data: result };
+  }, {
+    query: t.Object({
+      name: t.String(),
+      start: t.Optional(t.String()),
+      end: t.Optional(t.String())
+    })
   });

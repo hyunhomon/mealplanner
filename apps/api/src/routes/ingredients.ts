@@ -1,6 +1,7 @@
 import { Elysia, t } from 'elysia';
 import { supabase } from '../supabase';
 import { authMiddleware } from '../middleware/auth';
+import { getItemCode } from '../lib/itemCodes';
 
 export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   .use(authMiddleware)
@@ -28,16 +29,21 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
       return { success: false, error: '수량은 0.1 이상이어야 해요.' };
     }
 
+    const itemInfo = getItemCode(name); // 품목코드 자동 매핑
+
     const { data, error } = await supabase
-      .from('ingredients')
-      .insert([{
+    .from('ingredients')
+    .insert([{
         name,
         quantity,
         expired_at,
         is_consumed: false,
-        user_id: user.id
-      }])
-      .select();
+        user_id: user.id,
+        item_cd: itemInfo?.item_cd || null,
+        ctgry_cd: itemInfo?.ctgry_cd || null,
+        ctgry_nm: itemInfo?.ctgry_nm || null
+    }])
+    .select();
 
     if (error) return { success: false, error: error.message };
     return { success: true, data };
@@ -78,13 +84,19 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
     const ingredients = JSON.parse(cleaned);
 
     // DB에 저장 (본인 user_id 포함, 기본 수량 1)
-    const rows = ingredients.map((item: { name: string; expiryDays: number }) => ({
-      name: item.name,
-      quantity: 1, // 영수증/음성 입력 시 기본값
-      expired_at: new Date(Date.now() + item.expiryDays * 86400000).toISOString(),
-      is_consumed: false,
-      user_id: user.id // 본인 식재료로 저장
-    }));
+    const rows = ingredients.map((item: { name: string; expiryDays: number }) => {
+    const itemInfo = getItemCode(item.name); // 품목코드 자동 매핑
+    return {
+        name: item.name,
+        quantity: 1,
+        expired_at: new Date(Date.now() + item.expiryDays * 86400000).toISOString(),
+        is_consumed: false,
+        user_id: user.id,
+        item_cd: itemInfo?.item_cd || null,    // 품목코드
+        ctgry_cd: itemInfo?.ctgry_cd || null,  // 부류코드
+        ctgry_nm: itemInfo?.ctgry_nm || null   // 부류명
+    };
+    });
 
     const { data, error } = await supabase
       .from('ingredients')
@@ -121,6 +133,25 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
       ]);
 
     if (logError) return { success: false, error: logError.message };
+
+    // 식재료 소비 시 캐릭터 먹이 주기 자동 연동
+    await supabase
+    .from('user_character')
+    .select('hp, stage')
+    .eq('user_id', user.id)
+    .single()
+    .then(async ({ data }) => {
+        if (!data || data.stage === 'dead') return;
+        const newHp = Math.min(100, data.hp + 10);
+        const newStage = data.stage === 'egg' ? 'healthy'
+        : newHp >= 80 ? 'happy'
+        : newHp >= 40 ? 'healthy'
+        : 'weak';
+        await supabase
+        .from('user_character')
+        .update({ hp: newHp, stage: newStage, last_fed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq('user_id', user.id);
+    });
 
     return { success: true, message: 'Success' };
   }, {
