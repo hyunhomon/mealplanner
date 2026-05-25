@@ -1,56 +1,45 @@
-import { Elysia, t } from 'elysia';
+import { Elysia } from 'elysia';
 import type { CreateIngredientDto, Ingredient, IngredientSummary } from '@mealplanner/shared';
 import { supabase } from '../supabase';
 import { authMiddleware } from '../middleware/auth';
 import { fetchIngredientCatalog, getIngredientCatalogItem } from '../services/ingredientCatalog';
-
-type IngredientRow = {
-  id: string;
-  user_id: string;
-  item_code: string;
-  expires_at?: string;
-  expired_at?: string;
-  total_quantity?: number;
-  quantity?: number;
-  remaining_quantity?: number;
-  is_consumed?: boolean;
-  created_at: string;
-  updated_at?: string;
-};
-
-const toIngredient = (row: IngredientRow): Ingredient => {
-  const totalQuantity = Number(row.total_quantity ?? row.quantity ?? 1);
-  const remainingQuantity = Number(row.remaining_quantity ?? (row.is_consumed ? 0 : totalQuantity));
-
-  return {
-    id: row.id,
-    userId: row.user_id,
-    itemCode: row.item_code,
-    expiresAt: row.expires_at ?? row.expired_at ?? '',
-    totalQuantity,
-    remainingQuantity,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at ?? row.created_at
-  };
-};
+import { ingredientSchemas } from '../schemas';
+import { daysUntil, parseMonthRange } from '../lib/dates';
+import { assertQuantityRange, type IngredientRow, toIngredient } from '../lib/ingredients';
+import { fail, ok } from '../lib/responses';
 
 const withCatalog = async (ingredient: Ingredient): Promise<IngredientSummary> => ({
   ...ingredient,
   item: await getIngredientCatalogItem(ingredient.itemCode)
 });
 
-const fail = (set: any, status: number, code: string, message: string, details?: unknown) => {
-  set.status = status;
-  return { success: false, error: { code, message, details } };
+const ensureQuantityRange = (
+  set: { status?: unknown },
+  totalQuantity: number | undefined,
+  remainingQuantity: number | undefined
+) => {
+  if (assertQuantityRange(totalQuantity, remainingQuantity)) return undefined;
+
+  return fail(
+    set,
+    400,
+    'INVALID_QUANTITY_RANGE',
+    'remainingQuantity must be less than or equal to totalQuantity.'
+  );
 };
 
-const validateQuantity = (set: any, value: number) => {
-  if (value < 0) {
-    return fail(set, 400, 'INVALID_QUANTITY', 'Quantity must be greater than or equal to 0.');
-  }
+const getOwnedIngredient = async (userId: string, ingredientId: string) => {
+  const { data, error } = await supabase
+    .from('ingredients')
+    .select('*')
+    .eq('id', ingredientId)
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  return { data: data as IngredientRow | null, error };
 };
 
-export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
+export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients', tags: ['Ingredients'] })
   .use(authMiddleware)
 
   .get('/catalog', async ({ query, set }) => {
@@ -58,36 +47,41 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
       const page = await fetchIngredientCatalog({
         query: query.query,
         itemCode: query.itemCode,
-        page: query.page ? Number(query.page) : undefined,
-        pageSize: query.pageSize ? Number(query.pageSize) : undefined
+        page: query.page,
+        pageSize: query.pageSize
       });
 
-      return { success: true, data: page };
+      return ok(page);
     } catch (error) {
       return fail(set, 502, 'INGREDIENT_API_ERROR', 'Failed to fetch ingredient catalog.', error);
     }
   }, {
-    query: t.Object({
-      query: t.Optional(t.String()),
-      itemCode: t.Optional(t.String()),
-      page: t.Optional(t.Numeric()),
-      pageSize: t.Optional(t.Numeric())
-    })
+    query: ingredientSchemas.catalogQuery,
+    detail: {
+      tags: ['Ingredients'],
+      summary: 'Search the ingredient catalog',
+      description: 'Looks up normalized ingredient and price metadata from the external agromarket API.'
+    }
   })
 
   .get('/catalog/:itemCode', async ({ params, set }) => {
     try {
       const item = await getIngredientCatalogItem(params.itemCode);
       if (!item) return fail(set, 404, 'CATALOG_ITEM_NOT_FOUND', 'Ingredient catalog item not found.');
-      return { success: true, data: item };
+
+      return ok(item);
     } catch (error) {
       return fail(set, 502, 'INGREDIENT_API_ERROR', 'Failed to fetch ingredient catalog item.', error);
+    }
+  }, {
+    detail: {
+      tags: ['Ingredients'],
+      summary: 'Get one catalog item by item code'
     }
   })
 
   .get('/', async (ctx: any) => {
     const { query, user, set } = ctx;
-    const includeCatalog = query.includeCatalog === 'true';
     let request = supabase
       .from('ingredients')
       .select('*')
@@ -103,23 +97,24 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
     if (error) return fail(set, 500, 'INGREDIENT_LIST_FAILED', error.message);
 
     const ingredients = ((data ?? []) as IngredientRow[]).map(toIngredient);
-    const result = includeCatalog
+    const result = query.includeCatalog
       ? await Promise.all(ingredients.map(withCatalog))
       : ingredients;
 
-    return { success: true, data: result };
+    return ok(result);
   }, {
-    query: t.Object({
-      includeCatalog: t.Optional(t.String()),
-      expiringBefore: t.Optional(t.String())
-    })
+    query: ingredientSchemas.listQuery,
+    detail: {
+      tags: ['Ingredients'],
+      summary: 'List active user ingredients'
+    }
   })
 
   .post('/', async (ctx: any) => {
     const { body, user, set } = ctx;
     const dto = body as CreateIngredientDto;
     const remainingQuantity = dto.remainingQuantity ?? dto.totalQuantity;
-    const quantityError = validateQuantity(set, dto.totalQuantity) ?? validateQuantity(set, remainingQuantity);
+    const quantityError = ensureQuantityRange(set, dto.totalQuantity, remainingQuantity);
     if (quantityError) return quantityError;
 
     const { data, error } = await supabase
@@ -136,23 +131,34 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
       .single();
 
     if (error) return fail(set, 500, 'INGREDIENT_CREATE_FAILED', error.message);
-    return { success: true, data: toIngredient(data as IngredientRow) };
+    return ok(toIngredient(data as IngredientRow));
   }, {
-    body: t.Object({
-      itemCode: t.String(),
-      expiresAt: t.String(),
-      totalQuantity: t.Number({ minimum: 0 }),
-      remainingQuantity: t.Optional(t.Number({ minimum: 0 }))
-    })
+    body: ingredientSchemas.createBody,
+    detail: {
+      tags: ['Ingredients'],
+      summary: 'Create a user ingredient'
+    }
   })
 
   .patch('/:id', async (ctx: any) => {
     const { params, body, user, set } = ctx;
+    const existing = await getOwnedIngredient(user.id, params.id);
+    if (existing.error) return fail(set, 500, 'INGREDIENT_LOOKUP_FAILED', existing.error.message);
+    if (!existing.data) return fail(set, 404, 'INGREDIENT_NOT_FOUND', 'Ingredient not found.');
+
+    const current = toIngredient(existing.data);
+    const nextTotalQuantity = body.totalQuantity ?? current.totalQuantity;
+    const nextRemainingQuantity = body.remainingQuantity ?? current.remainingQuantity;
+    const quantityError = ensureQuantityRange(set, nextTotalQuantity, nextRemainingQuantity);
+    if (quantityError) return quantityError;
+
     const patch: Record<string, unknown> = {};
     if (body.expiresAt !== undefined) patch.expired_at = body.expiresAt;
     if (body.totalQuantity !== undefined) patch.quantity = body.totalQuantity;
     if (body.remainingQuantity !== undefined) patch.remaining_quantity = body.remainingQuantity;
-    if (body.remainingQuantity !== undefined) patch.is_consumed = body.remainingQuantity <= 0;
+
+    // Consumption state is derived from remaining quantity so clients only send one source of truth.
+    patch.is_consumed = nextRemainingQuantity <= 0;
 
     const { data, error } = await supabase
       .from('ingredients')
@@ -163,17 +169,25 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
       .single();
 
     if (error) return fail(set, 500, 'INGREDIENT_UPDATE_FAILED', error.message);
-    return { success: true, data: toIngredient(data as IngredientRow) };
+    return ok(toIngredient(data as IngredientRow));
   }, {
-    body: t.Object({
-      expiresAt: t.Optional(t.String()),
-      totalQuantity: t.Optional(t.Number({ minimum: 0 })),
-      remainingQuantity: t.Optional(t.Number({ minimum: 0 }))
-    })
+    body: ingredientSchemas.updateBody,
+    detail: {
+      tags: ['Ingredients'],
+      summary: 'Update a user ingredient'
+    }
   })
 
   .post('/:id/consume', async (ctx: any) => {
     const { params, body, user, set } = ctx;
+    const existing = await getOwnedIngredient(user.id, params.id);
+    if (existing.error) return fail(set, 500, 'INGREDIENT_LOOKUP_FAILED', existing.error.message);
+    if (!existing.data) return fail(set, 404, 'INGREDIENT_NOT_FOUND', 'Ingredient not found.');
+
+    const current = toIngredient(existing.data);
+    const quantityError = ensureQuantityRange(set, current.totalQuantity, body.remainingQuantity);
+    if (quantityError) return quantityError;
+
     const { data, error } = await supabase
       .from('ingredients')
       .update({
@@ -186,32 +200,34 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
       .single();
 
     if (error) return fail(set, 500, 'INGREDIENT_CONSUME_FAILED', error.message);
-    return { success: true, data: toIngredient(data as IngredientRow) };
+    return ok(toIngredient(data as IngredientRow));
   }, {
-    body: t.Object({
-      remainingQuantity: t.Number({ minimum: 0 })
-    })
+    body: ingredientSchemas.consumeBody,
+    detail: {
+      tags: ['Ingredients'],
+      summary: 'Set the remaining quantity after consumption'
+    }
   })
 
   .get('/calendar', async (ctx: any) => {
     const { query, user, set } = ctx;
-    const startDate = new Date(`${query.month}-01`).toISOString();
-    const end = new Date(`${query.month}-01`);
-    end.setMonth(end.getMonth() + 1);
+    const range = parseMonthRange(query.month);
+    if (!range) return fail(set, 400, 'INVALID_MONTH', 'month must use YYYY-MM format.');
 
     const { data, error } = await supabase
       .from('ingredients')
       .select('*')
       .eq('user_id', user.id)
-      .gte('expired_at', startDate)
-      .lt('expired_at', end.toISOString())
+      .gte('expired_at', range.startIso)
+      .lt('expired_at', range.endIso)
       .order('expired_at', { ascending: true });
 
     if (error) return fail(set, 500, 'INGREDIENT_CALENDAR_FAILED', error.message);
 
     const calendar = ((data ?? []) as IngredientRow[]).map((row) => {
       const ingredient = toIngredient(row);
-      const daysLeft = Math.ceil((new Date(ingredient.expiresAt).getTime() - Date.now()) / 86400000);
+      const daysLeft = daysUntil(ingredient.expiresAt);
+
       return {
         id: ingredient.id,
         itemCode: ingredient.itemCode,
@@ -221,28 +237,29 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
       };
     });
 
-    return { success: true, data: calendar };
+    return ok(calendar);
   }, {
-    query: t.Object({
-      month: t.String()
-    })
+    query: ingredientSchemas.calendarQuery,
+    detail: {
+      tags: ['Ingredients'],
+      summary: 'List ingredients expiring in a calendar month'
+    }
   })
 
   .get('/shop-links', async ({ query }) => {
     const encoded = encodeURIComponent(query.name);
-    return {
-      success: true,
-      data: {
-        coupang: `https://www.coupang.com/np/search?q=${encoded}`,
-        naver: `https://search.shopping.naver.com/search/all?query=${encoded}`,
-        kurly: `https://www.kurly.com/search?sword=${encoded}`,
-        ssg: `https://www.ssg.com/search.ssg?query=${encoded}`
-      }
-    };
+    return ok({
+      coupang: `https://www.coupang.com/np/search?q=${encoded}`,
+      naver: `https://search.shopping.naver.com/search/all?query=${encoded}`,
+      kurly: `https://www.kurly.com/search?sword=${encoded}`,
+      ssg: `https://www.ssg.com/search.ssg?query=${encoded}`
+    });
   }, {
-    query: t.Object({
-      name: t.String()
-    })
+    query: ingredientSchemas.shopLinksQuery,
+    detail: {
+      tags: ['Ingredients'],
+      summary: 'Create shopping search links for an ingredient name'
+    }
   })
 
   .get('/:id', async (ctx: any) => {
@@ -252,15 +269,18 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
       .select('*')
       .eq('id', params.id)
       .eq('user_id', user.id)
-      .single();
+      .maybeSingle();
 
-    if (error) return fail(set, 404, 'INGREDIENT_NOT_FOUND', error.message);
+    if (error) return fail(set, 500, 'INGREDIENT_LOOKUP_FAILED', error.message);
+    if (!data) return fail(set, 404, 'INGREDIENT_NOT_FOUND', 'Ingredient not found.');
 
     const ingredient = toIngredient(data as IngredientRow);
-    const result = query.includeCatalog === 'true' ? await withCatalog(ingredient) : ingredient;
-    return { success: true, data: result };
+    const result = query.includeCatalog ? await withCatalog(ingredient) : ingredient;
+    return ok(result);
   }, {
-    query: t.Object({
-      includeCatalog: t.Optional(t.String())
-    })
+    query: ingredientSchemas.detailQuery,
+    detail: {
+      tags: ['Ingredients'],
+      summary: 'Get one user ingredient'
+    }
   });

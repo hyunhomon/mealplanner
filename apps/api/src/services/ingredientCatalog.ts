@@ -34,6 +34,7 @@ interface EcoFriendlyPriceResponse {
 
 const DEFAULT_BASE_URL = 'https://api.agromarket.kr/api/ecoFriendly/v1/price';
 const DEFAULT_LOOKBACK_DAYS = 210;
+const catalogItemCache = new Map<string, IngredientCatalogItem | undefined>();
 
 const compact = (value: unknown) => String(value ?? '').trim();
 
@@ -134,6 +135,13 @@ export const fetchIngredientCatalog = async (
 };
 
 export const getIngredientCatalogItem = async (itemCode: string) => {
+  if (catalogItemCache.has(itemCode)) {
+    return catalogItemCache.get(itemCode);
+  }
+
   const page = await fetchIngredientCatalog({ itemCode, pageSize: 1000 });
-  return page.items.find((item) => item.itemCode === itemCode) ?? page.items[0];
+  const item = page.items.find((candidate) => candidate.itemCode === itemCode) ?? page.items[0];
+  catalogItemCache.set(itemCode, item);
+
+  return item;
 };

@@ -35,6 +35,7 @@ const normalizeRecipe = (row: FoodSafetyRecipeRow): Recipe => {
     const suffix = String(index + 1).padStart(2, '0');
     const description = compact(row[`MANUAL${suffix}`]);
     if (!description) return undefined;
+
     return {
       order: index + 1,
       description: normalizeManual(description),
@@ -76,7 +77,7 @@ export const extractIngredientNames = (ingredientText: string) => {
     '드레싱',
     '물',
     '소금',
-    '설탕',
+    '식초',
     '후추',
     '약간',
     '재료',
@@ -84,13 +85,13 @@ export const extractIngredientNames = (ingredientText: string) => {
   ]);
 
   const names = ingredientText
-    .replace(/[●:&]/g, '\n')
+    .replace(/[·&]/g, '\n')
     .split(/[\n,]/)
     .map((part) =>
       part
         .replace(/\([^)]*\)/g, '')
-        .replace(/[0-9./×~\-⅓⅔¼½¾]+/g, ' ')
-        .replace(/\b(g|kg|ml|l|개|컵|큰술|작은술|장|줄기|마리|모|알|봉지|쪽|cm)\b/gi, ' ')
+        .replace(/[0-9./×~\-]+/g, ' ')
+        .replace(/\b(g|kg|ml|l|개|컵|큰술|작은술|줄기|마리|모|봉지|쪽|cm)\b/gi, ' ')
         .trim()
         .split(/\s+/)[0]
     )
@@ -100,7 +101,7 @@ export const extractIngredientNames = (ingredientText: string) => {
   return [...new Set(names)];
 };
 
-export const fetchRecipes = async (start = 1, end = 1000) => {
+export const fetchRecipePage = async (start = 1, end = 1000) => {
   const key = Bun.env.RECIPE_API_KEY;
   if (!key) {
     throw new RecipeCatalogError('RECIPE_API_KEY is not configured');
@@ -119,5 +120,13 @@ export const fetchRecipes = async (start = 1, end = 1000) => {
     throw new RecipeCatalogError(result.MSG || 'Recipe API returned an error', result);
   }
 
-  return (payload.COOKRCP01?.row ?? []).map(normalizeRecipe);
+  return {
+    items: (payload.COOKRCP01?.row ?? []).map(normalizeRecipe),
+    totalCount: toNumber(payload.COOKRCP01?.total_count) ?? payload.COOKRCP01?.row?.length ?? 0
+  };
+};
+
+export const fetchRecipes = async (start = 1, end = 1000) => {
+  const page = await fetchRecipePage(start, end);
+  return page.items;
 };
