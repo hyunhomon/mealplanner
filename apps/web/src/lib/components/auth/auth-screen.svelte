@@ -1,4 +1,4 @@
-<script lang="ts">
+﻿<script lang="ts">
   import { ArrowLeft, Check, Leaf, Lock, Mail } from "lucide-svelte";
   import { Badge } from "$lib/components/ui/badge";
   import { Button } from "$lib/components/ui/button";
@@ -36,6 +36,10 @@
   let password = $state("");
   let errorMessage = $state("");
   let loading = $state(false);
+
+  const handleForgotPassword = () => {
+    errorMessage = "비밀번호 재설정은 아직 준비 중이에요. 가입한 이메일로 다시 로그인해 주세요.";
+  };
 
   const handleSubmit = async () => {
     if (loading) return;
@@ -114,7 +118,7 @@
           </label>
         {:else}
           <div class="flex justify-end">
-            <Button class="h-auto px-0 text-[#5d7564] hover:bg-transparent" href="/login" variant="ghost">비밀번호를 잊었나요?</Button>
+            <Button class="h-auto px-0 text-[#5d7564] hover:bg-transparent" type="button" variant="ghost" onclick={handleForgotPassword}>비밀번호를 잊었나요?</Button>
           </div>
         {/if}
 

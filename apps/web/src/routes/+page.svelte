@@ -12,6 +12,7 @@
     LogOut,
     Menu,
     Minus,
+    Plus,
     RefreshCw,
     Search,
     Sprout,
@@ -27,6 +28,7 @@
   import { Sheet, SheetContent, SheetOverlay } from "$lib/components/ui/sheet";
   import {
     clearSession,
+    createIngredient,
     getStoredSession,
     loadCharacter,
     loadIngredients,
@@ -302,11 +304,51 @@
   };
   const ingredientName = (ingredient: IngredientView) => ingredient.item?.name ?? ingredient.itemCode;
   const ingredientUnit = (ingredient: IngredientView) => ingredient.item?.unit ?? "";
-  const ingredientAmount = (ingredient: IngredientView) => `${ingredient.remainingQuantity}${ingredientUnit}`;
+  const ingredientAmount = (ingredient: IngredientView) => `${ingredient.remainingQuantity}${ingredientUnit(ingredient)}`;
   const ingredientTag = (ingredient: IngredientView) => ingredient.item?.category ?? ingredient.storage;
   const ingredientMeta = (ingredient: IngredientView) => `${ingredient.storage} · ${dueLabel(ingredient.expiresAt)} 남음`;
+  const formatDateInput = (date: Date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  };
+  const dateInputToIso = (value: string) => new Date(`${value}T23:59:59`).toISOString();
+  const pageFromHash = (hash: string): PageId | null => {
+    const page = hash.replace(/^#/, "");
+    return pages.some((item) => item.id === page) ? (page as PageId) : null;
+  };
+  const normalizeSearch = (value: string) => value.trim().toLocaleLowerCase("ko-KR");
   const sameDate = (left: Date, right: Date) =>
     left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth() && left.getDate() === right.getDate();
+  const includesSearch = (query: string, values: Array<string | undefined>) => {
+    if (!query) return true;
+    return values.some((value) => value?.toLocaleLowerCase("ko-KR").includes(query));
+  };
+  const matchesIngredientSearch = (ingredient: IngredientView, rawQuery: string) => {
+    const query = normalizeSearch(rawQuery);
+    return includesSearch(query, [
+      ingredientName(ingredient),
+      ingredient.itemCode,
+      ingredient.item?.category,
+      ingredient.storage,
+      ingredient.memo,
+    ]);
+  };
+  const matchesRecipeSearch = (recipe: RecipeView, rawQuery: string) => {
+    const query = normalizeSearch(rawQuery);
+    return includesSearch(query, [
+      recipe.recipe.name,
+      recipe.recipe.ingredientText,
+      recipe.recipe.cookingMethod,
+      recipe.recipe.dishType,
+      recipe.recipe.hashTag,
+      ...recipe.matchedIngredientNames,
+      ...recipe.missingIngredientNames,
+    ]);
+  };
+  const ingredientProgress = (ingredient: IngredientView) =>
+    ingredient.totalQuantity > 0 ? (ingredient.remainingQuantity / ingredient.totalQuantity) * 100 : 0;
   const weekStartOf = (date: Date) => addDays(toStartOfDay(date), -((date.getDay() + 6) % 7));
 
   const mockMealResults: MockMealResult[] = [
@@ -412,6 +454,15 @@
 
   let activePage: PageId = "greeney";
   let menuOpen = false;
+  let addIngredientOpen = false;
+  let addIngredientName = "";
+  let addIngredientQuantity = 1;
+  let addIngredientExpiresAt = formatDateInput(addDays(new Date(), 3));
+  let addIngredientBusy = false;
+  let addIngredientError = "";
+  let ingredientSearchQuery = "";
+  let recipeSearchQuery = "";
+  let selectedCalendarDate: Date | null = null;
   let weekOffset = 0;
   let selectedIngredient: IngredientView | null = null;
   let selectedRecipe: RecipeView | null = null;
@@ -443,11 +494,17 @@
       date,
       dateLabel: String(date.getDate()),
       count,
-      active: sameDate(date, today),
+      active: selectedCalendarDate ? sameDate(date, selectedCalendarDate) : sameDate(date, today),
     };
   });
   $: weekRangeLabel = `${formatDate(weekDays[0].date)} - ${formatDate(weekDays[6].date)}`;
   $: urgent = [...ingredients].sort((a, b) => new Date(a.expiresAt).getTime() - new Date(b.expiresAt).getTime()).slice(0, 3);
+  $: searchedIngredients = ingredients.filter((ingredient) => matchesIngredientSearch(ingredient, ingredientSearchQuery));
+  $: visibleIngredients = selectedCalendarDate
+    ? searchedIngredients.filter((ingredient) => sameDate(new Date(ingredient.expiresAt), selectedCalendarDate as Date))
+    : searchedIngredients;
+  $: filteredRecipes = recipes.filter((recipe) => matchesRecipeSearch(recipe, recipeSearchQuery));
+  $: selectedCalendarLabel = selectedCalendarDate ? formatDate(selectedCalendarDate) : "";
   $: roundedHappiness = Math.round(state.happiness);
   $: mood = getMood(state.happiness);
   $: stateLabel = mood === "happy" ? "행복" : mood === "normal" ? "보통" : mood === "sad" ? "우울" : "멈춤";
@@ -570,6 +627,67 @@
     }
   };
 
+  const resetAddIngredientForm = () => {
+    addIngredientName = "";
+    addIngredientQuantity = 1;
+    addIngredientExpiresAt = formatDateInput(addDays(new Date(), 3));
+    addIngredientError = "";
+  };
+
+  const openAddIngredient = () => {
+    resetAddIngredientForm();
+    addIngredientOpen = true;
+  };
+
+  const closeAddIngredient = () => {
+    if (addIngredientBusy) return;
+    addIngredientOpen = false;
+    resetAddIngredientForm();
+  };
+
+  const submitAddIngredient = async () => {
+    const name = addIngredientName.trim();
+    if (!name) {
+      addIngredientError = "식재료 이름을 입력해 주세요.";
+      return;
+    }
+
+    if (!addIngredientExpiresAt) {
+      addIngredientError = "유통기한을 선택해 주세요.";
+      return;
+    }
+
+    const quantity = Number(addIngredientQuantity);
+    if (!Number.isFinite(quantity) || quantity < 0.1) {
+      addIngredientError = "수량은 0.1 이상이어야 해요.";
+      return;
+    }
+
+    if (!getStoredSession()) {
+      addIngredientError = "로그인 후 식재료를 추가할 수 있어요.";
+      return;
+    }
+
+    addIngredientBusy = true;
+    addIngredientError = "";
+
+    try {
+      const created = await createIngredient({
+        name,
+        quantity,
+        expiredAt: dateInputToIso(addIngredientExpiresAt),
+      });
+      ingredients = [...created, ...ingredients];
+      selectedIngredient = created[0] ?? null;
+      addIngredientOpen = false;
+      resetAddIngredientForm();
+    } catch (error) {
+      addIngredientError = error instanceof Error ? error.message : "식재료를 추가하지 못했어요.";
+    } finally {
+      addIngredientBusy = false;
+    }
+  };
+
   const stopCamera = () => {
     cameraStream?.getTracks().forEach((track) => track.stop());
     cameraStream = null;
@@ -635,10 +753,6 @@
     const image = cameraCanvas.toDataURL("image/jpeg", 0.9).split(",")[1] ?? "";
     const fileName = `webcam-${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
 
-    if (cameraSource === "fridge") {
-      activePage = "greeney";
-    }
-
     try {
       await handleMealPhoto(image, fileName);
       closeCamera();
@@ -669,9 +783,21 @@
     sessionEmail = "";
   };
 
+  const syncPageFromHash = () => {
+    const page = pageFromHash(window.location.hash);
+    if (page) activePage = page;
+  };
+
   const movePage = (page: PageId) => {
     activePage = page;
     menuOpen = false;
+    if (mounted && window.location.hash !== `#${page}`) {
+      window.history.pushState(null, "", `${window.location.pathname}${window.location.search}#${page}`);
+    }
+  };
+
+  const selectCalendarDate = (date: Date) => {
+    selectedCalendarDate = selectedCalendarDate && sameDate(selectedCalendarDate, date) ? null : new Date(date);
   };
 
   const resetDetailSheetDrag = () => {
@@ -730,6 +856,7 @@
 
   onMount(() => {
     mounted = true;
+    syncPageFromHash();
     state = readState();
     persist();
     void refreshRemoteData();
@@ -746,7 +873,7 @@
   });
 </script>
 
-<svelte:window onpointermove={moveDetailSheetDrag} onpointerup={endDetailSheetDrag} onpointercancel={endDetailSheetDrag} />
+<svelte:window onhashchange={syncPageFromHash} onpointermove={moveDetailSheetDrag} onpointerup={endDetailSheetDrag} onpointercancel={endDetailSheetDrag} />
 
 <svelte:head>
   <title>greeney | Mealplanner</title>
@@ -866,7 +993,7 @@
                 </div>
                 <div class="grid grid-cols-7 gap-1.5">
                   {#each weekDays as item}
-                    <button type="button" class={`grid h-20 content-center gap-1 rounded-xl text-center text-sm transition ${item.active ? "bg-[#1d211c] text-white" : "bg-[#f5f3ed] hover:bg-[#ece8df]"}`}>
+                    <button type="button" class={`grid h-20 content-center gap-1 rounded-xl text-center text-sm transition ${item.active ? "bg-[#1d211c] text-white" : "bg-[#f5f3ed] hover:bg-[#ece8df]"}`} onclick={() => selectCalendarDate(item.date)}>
                       <span class="text-xs opacity-70">{item.day}</span>
                       <strong class="text-lg">{item.dateLabel}</strong>
                       <span class="text-xs opacity-70">{item.count}개</span>
@@ -890,7 +1017,7 @@
                       </div>
                       <Badge class="rounded-full" variant={dueLabel(item.expiresAt) === "오늘" ? "default" : "outline"}>{dueLabel(item.expiresAt)}</Badge>
                     </div>
-                    <Progress class="[&>div]:bg-[#5fb76e]" value={(item.remainingQuantity / item.totalQuantity) * 100} />
+                    <Progress class="[&>div]:bg-[#5fb76e]" value={ingredientProgress(item)} />
                   </button>
                 {/each}
               </CardContent>
@@ -900,10 +1027,16 @@
               <CardContent class="grid gap-4 p-5">
                 <div class="relative">
                   <Search class="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-[#7c837d]" />
-                  <Input class="h-12 rounded-full bg-[#f5f3ed] pl-10" placeholder="식재료 검색" />
+                  <Input class="h-12 rounded-full bg-[#f5f3ed] pl-10" placeholder="식재료 검색" value={ingredientSearchQuery} oninput={(event) => (ingredientSearchQuery = event.currentTarget.value)} />
                 </div>
+                {#if selectedCalendarDate}
+                  <div class="flex items-center justify-between gap-3 rounded-xl bg-[#f0ede5] px-4 py-3 text-sm text-[#69716b]">
+                    <span>{selectedCalendarLabel} 식재료만 보는 중</span>
+                    <button type="button" class="font-semibold text-[#2f7c43]" onclick={() => (selectedCalendarDate = null)}>전체 보기</button>
+                  </div>
+                {/if}
                 <div class="grid gap-2">
-                  {#each ingredients as item}
+                  {#each visibleIngredients as item}
                     <button type="button" class="flex items-center gap-3 rounded-xl bg-[#f5f3ed] p-4 text-left transition hover:bg-[#ece8df]" onclick={() => (selectedIngredient = item)}>
                       <div class="size-2 rounded-full bg-[#5fb76e]"></div>
                       <div class="min-w-0 flex-1">
@@ -913,6 +1046,9 @@
                       <Badge class="rounded-full" variant="muted">{ingredientTag(item)}</Badge>
                     </button>
                   {/each}
+                  {#if visibleIngredients.length === 0}
+                    <p class="rounded-xl bg-[#f5f3ed] p-4 text-sm font-medium text-[#69716b]">조건에 맞는 식재료가 없어요.</p>
+                  {/if}
                 </div>
               </CardContent>
             </Card>
@@ -922,10 +1058,10 @@
             <CardContent class="grid gap-4 p-5">
               <div class="relative">
                 <Search class="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-[#7c837d]" />
-                <Input class="h-12 rounded-full bg-[#f5f3ed] pl-10" placeholder="레시피 검색" />
+                <Input class="h-12 rounded-full bg-[#f5f3ed] pl-10" placeholder="레시피 검색" value={recipeSearchQuery} oninput={(event) => (recipeSearchQuery = event.currentTarget.value)} />
               </div>
               <div class="grid gap-2">
-                {#each recipes as recipe}
+                {#each filteredRecipes as recipe}
                   <button type="button" class="flex min-h-16 items-center justify-between gap-4 rounded-xl bg-[#f5f3ed] px-4 text-left transition hover:bg-[#ece8df]" onclick={() => (selectedRecipe = recipe)}>
                     <div class="min-w-0">
                       <h2 class="truncate font-semibold">{recipe.recipe.name}</h2>
@@ -934,6 +1070,9 @@
                     <Badge class="rounded-full" variant="secondary">{Math.round(recipe.score * 100)}점</Badge>
                   </button>
                 {/each}
+                {#if filteredRecipes.length === 0}
+                  <p class="rounded-xl bg-[#f5f3ed] p-4 text-sm font-medium text-[#69716b]">조건에 맞는 레시피가 없어요.</p>
+                {/if}
               </div>
             </CardContent>
           </Card>
@@ -988,13 +1127,54 @@
         type="button"
         class="fixed bottom-6 left-[max(1rem,calc(50%-240px+1rem))] z-40 inline-flex h-14 cursor-pointer items-center gap-3 rounded-full bg-[#5fb76e] pl-4 pr-5 text-white shadow-[0_14px_40px_rgba(74,151,87,0.3)] transition hover:bg-[#4da25c]"
         aria-label="식재료 추가"
-        onclick={() => openCamera("fridge")}
+        onclick={openAddIngredient}
       >
         <span class="grid size-8 place-items-center rounded-full bg-white/18">
-          <Camera class="size-5" />
+          <Plus class="size-5" />
         </span>
         <span class="text-sm font-semibold">식재료 추가</span>
       </button>
+    {/if}
+
+    {#if addIngredientOpen}
+      <div class="fixed inset-0 left-1/2 z-50 w-full max-w-[480px] -translate-x-1/2 overflow-hidden" role="dialog" aria-modal="true" aria-label="식재료 추가">
+        <button class="absolute inset-0 bg-black/24 backdrop-blur-[1px]" type="button" aria-label="식재료 추가 닫기" onclick={closeAddIngredient}></button>
+        <form class="absolute inset-x-0 bottom-0 grid gap-4 rounded-t-[1.75rem] bg-[#f7f6f1] p-5 pb-7 shadow-[0_-24px_70px_rgba(29,33,28,0.24)]" onsubmit={(event) => { event.preventDefault(); void submitAddIngredient(); }}>
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="text-sm font-medium text-[#69716b]">냉장고</p>
+              <h2 class="text-xl font-semibold">식재료 추가</h2>
+            </div>
+            <Button class="size-10 rounded-full bg-[#e2ded5] text-[#2c302b] hover:bg-[#d7d1c6]" size="icon" type="button" variant="secondary" aria-label="닫기" onclick={closeAddIngredient}>
+              <X class="size-4" />
+            </Button>
+          </div>
+
+          <label class="grid gap-2 text-sm font-semibold text-[#3b4139]">
+            이름
+            <Input class="h-12 rounded-xl bg-white" placeholder="두부" value={addIngredientName} disabled={addIngredientBusy} oninput={(event) => (addIngredientName = event.currentTarget.value)} />
+          </label>
+
+          <div class="grid grid-cols-2 gap-3">
+            <label class="grid gap-2 text-sm font-semibold text-[#3b4139]">
+              수량
+              <Input class="h-12 rounded-xl bg-white" type="number" min="0.1" step="0.1" value={addIngredientQuantity} disabled={addIngredientBusy} oninput={(event) => (addIngredientQuantity = Number(event.currentTarget.value))} />
+            </label>
+            <label class="grid gap-2 text-sm font-semibold text-[#3b4139]">
+              유통기한
+              <Input class="h-12 rounded-xl bg-white" type="date" value={addIngredientExpiresAt} disabled={addIngredientBusy} oninput={(event) => (addIngredientExpiresAt = event.currentTarget.value)} />
+            </label>
+          </div>
+
+          {#if addIngredientError}
+            <p class="rounded-xl bg-[#fff0e8] p-3 text-sm font-medium leading-5 text-[#a34b26]">{addIngredientError}</p>
+          {/if}
+
+          <Button class="h-12 rounded-full bg-[#1d211c] text-white hover:bg-[#30382f]" type="submit" disabled={addIngredientBusy}>
+            {addIngredientBusy ? "추가 중" : "추가하기"}
+          </Button>
+        </form>
+      </div>
     {/if}
 
     {#if cameraOpen}
@@ -1122,7 +1302,7 @@
                       <span class="text-[#69716b]">사용 가능량</span>
                       <span class="font-semibold">{selectedIngredient.remainingQuantity} / {selectedIngredient.totalQuantity}{ingredientUnit(selectedIngredient)}</span>
                     </div>
-                    <Progress class="[&>div]:bg-[#5fb76e]" value={(selectedIngredient.remainingQuantity / selectedIngredient.totalQuantity) * 100} />
+                    <Progress class="[&>div]:bg-[#5fb76e]" value={ingredientProgress(selectedIngredient)} />
                   </div>
                   <div class="grid gap-2 text-sm">
                     <div class="flex items-center justify-between gap-4">

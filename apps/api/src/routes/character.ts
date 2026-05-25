@@ -1,7 +1,8 @@
 import { Elysia, t } from 'elysia';
 import { supabase } from '../supabase';
 import { authMiddleware } from '../middleware/auth';
-import { getEnv } from '../env';
+import { fail } from '../lib/responses';
+import { LlmError, analyzeMealPhoto } from '../services/llm';
 
 /**
  * 캐릭터 상태 시스템
@@ -34,6 +35,18 @@ const HEALTHY_THRESHOLD = 40; // ✏️ healthy 상태 최소 HP (이하 weak)
 
 const INITIAL_HP = 50;        // ✏️ 캐릭터 최초 생성 / 부활 시 HP
 const FEED_EXP_GAIN = 1;      // ✏️ 먹이 줄 때 경험치 증가량
+
+const failLlm = (set: { status?: unknown }, error: unknown) => {
+  if (error instanceof LlmError && error.code === 'LLM_CONFIG_ERROR') {
+    return fail(set, 500, error.code, error.message);
+  }
+
+  if (error instanceof LlmError) {
+    return fail(set, 502, error.code, error.message, error.details);
+  }
+
+  return fail(set, 502, 'LLM_ANALYSIS_FAILED', 'Failed to analyze the meal photo with LLM.', error);
+};
 
 // ─────────────────────────────────────────
 
@@ -251,8 +264,8 @@ export const characterRoutes = new Elysia({ prefix: '/api/character' })
     };
   })
 
-  /*음식 사진 촬영 시 HP 회복/감소*/
-  .post('/eat-photo', async ({ body, user }: any) => {
+  /*Analyze meal photo and update HP*/
+  .post('/eat-photo', async ({ body, user, set }: any) => {
     const { image, recommended_recipe_name } = body;
 
     const { data: character, error } = await supabase
@@ -261,78 +274,32 @@ export const characterRoutes = new Elysia({ prefix: '/api/character' })
       .eq('user_id', user.id)
       .single();
 
-    if (error || !character) return { success: false, error: '캐릭터가 없어요.' };
-    if (character.stage === 'dead') return { success: false, error: '먼저 새 알을 받아야 해요.', need_rebirth: true };
-    if (character.stage === 'egg') return { success: false, error: '아직 알 상태예요.' };
+    if (error || !character) return { success: false, error: 'Character not found.' };
+    if (character.stage === 'dead') return { success: false, error: 'Rebirth is required first.', need_rebirth: true };
+    if (character.stage === 'egg') return { success: false, error: 'Character is still an egg.' };
 
-    // ─────────────────────────────────────────
-    // ✏️ HP 변화량 설정
-    // ─────────────────────────────────────────
-    const HP_HEALTHY = 15;    // ✏️ 건강한 음식 사진 → HP +15 (예: 30 + 15 = 45)
-    const HP_RECIPE = 20;     // ✏️ 추천 레시피 음식 → HP +20 (예: 30 + 20 = 50)
-    const HP_UNHEALTHY = -5;  // ✏️ 건강하지 않은 음식 → HP -5 (예: 30 - 5 = 25)
-    // ─────────────────────────────────────────
+    const HP_HEALTHY = 15;
+    const HP_RECIPE = 20;
+    const HP_UNHEALTHY = -5;
 
-    // OpenRouter LLM으로 음식 사진 분석
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${getEnv('OPENROUTER_API_KEY')}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-flash-1.5',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'image_url',
-                image_url: { url: `data:image/jpeg;base64,${image}` }
-              },
-              {
-                type: 'text',
-                text: `이 음식 사진을 분석해줘. 다음 JSON 형식으로만 반환해줘:
-{
-  "food_name": "음식 이름",
-  "is_unhealthy": true/false,
-  "is_recommended_recipe": true/false,
-  "reason": "판단 이유"
-}
-
-판단 기준:
-1. is_unhealthy: 패스트푸드, 튀긴 음식, 과자, 탄산음료, 술 등 건강에 좋지 않은 음식이면 true
-2. is_recommended_recipe: 추천 레시피명 "${recommended_recipe_name || ''}"과 사진 음식이 일치하면 true. 추천 레시피명이 없으면 false
-3. is_unhealthy가 true이면 is_recommended_recipe는 무조건 false`
-              }
-            ]
-          }
-        ]
-      })
-    });
-
-    const result = await response.json();
-    // LLM이 마크다운으로 감싸서 반환할 경우 제거 후 파싱
-    const cleaned = result.choices[0].message.content.replace(/```json|```/g, '').trim();
-    const analysis = JSON.parse(cleaned);
-
-    // HP 변화량 결정
-    // 우선순위: 건강하지 않은 음식 > 추천 레시피 > 일반 건강 음식
-    let hpChange = 0;
-    let message = '';
-
-    if (analysis.is_unhealthy) {
-      hpChange = HP_UNHEALTHY; // -5
-      message = `건강에 좋지 않은 음식이에요! HP ${hpChange} 😟 (${analysis.food_name})`;
-    } else if (analysis.is_recommended_recipe) {
-      hpChange = HP_RECIPE;    // +20
-      message = `추천 레시피 음식이에요! HP +${hpChange} 🎉 (${analysis.food_name})`;
-    } else {
-      hpChange = HP_HEALTHY;   // +15
-      message = `건강한 음식이에요! HP +${hpChange} 😊 (${analysis.food_name})`;
+    let analysis;
+    try {
+      analysis = await analyzeMealPhoto(image, recommended_recipe_name);
+    } catch (error) {
+      return failLlm(set, error);
     }
 
-    // 새 HP 계산 (예: 30 + 15 = 45)
+    let hpChange = HP_HEALTHY;
+    let message = `Healthy meal. HP +${HP_HEALTHY} (${analysis.foodName})`;
+
+    if (analysis.isUnhealthy) {
+      hpChange = HP_UNHEALTHY;
+      message = `Unhealthy meal. HP ${hpChange} (${analysis.foodName})`;
+    } else if (analysis.isRecommendedRecipe) {
+      hpChange = HP_RECIPE;
+      message = `Recommended recipe match. HP +${HP_RECIPE} (${analysis.foodName})`;
+    }
+
     const newHp = Math.min(MAX_HP, Math.max(MIN_HP, character.hp + hpChange));
     const newStage = calcStage(newHp, character.stage);
 
@@ -356,9 +323,9 @@ export const characterRoutes = new Elysia({ prefix: '/api/character' })
         hp_before: character.hp,
         hp_change: hpChange,
         hp_after: newHp,
-        food_name: analysis.food_name,
-        is_unhealthy: analysis.is_unhealthy,
-        is_recommended_recipe: analysis.is_recommended_recipe,
+        food_name: analysis.foodName,
+        is_unhealthy: analysis.isUnhealthy,
+        is_recommended_recipe: analysis.isRecommendedRecipe,
         reason: analysis.reason,
         status_message: getStatusMessage(newStage, newHp),
         message
@@ -366,11 +333,10 @@ export const characterRoutes = new Elysia({ prefix: '/api/character' })
     };
   }, {
     body: t.Object({
-      image: t.String(),                              // base64 이미지
-      recommended_recipe_name: t.Optional(t.String()) // 추천 레시피명 (없으면 생략 가능)
+      image: t.String(),
+      recommended_recipe_name: t.Optional(t.String())
     })
   });
-
 // ─────────────────────────────────────────
 // ✏️ 상태별 메시지 (원하는 문구로 변경 가능)
 // ─────────────────────────────────────────

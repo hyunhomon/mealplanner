@@ -3,6 +3,12 @@ import { supabase } from '../supabase';
 import { authMiddleware } from '../middleware/auth';
 import { getItemCode } from '../lib/itemCodes';
 import { getEnv } from '../env';
+import { fail } from '../lib/responses';
+import {
+  LlmError,
+  analyzeConsumptionImage,
+  parseIngredientsFromScan
+} from '../services/llm';
 
 const INGREDIENT_WEIGHTS_KG: Record<string, number> = {
   '\uB300\uD30C': 0.5,
@@ -14,6 +20,18 @@ const INGREDIENT_WEIGHTS_KG: Record<string, number> = {
 };
 
 const foodSafetyApiKey = () => getEnv('FOODSAFETY_API_KEY') ?? getEnv('INGREDIENT_API_KEY');
+
+const failLlm = (set: { status?: unknown }, error: unknown) => {
+  if (error instanceof LlmError && error.code === 'LLM_CONFIG_ERROR') {
+    return fail(set, 500, error.code, error.message);
+  }
+
+  if (error instanceof LlmError) {
+    return fail(set, 502, error.code, error.message, error.details);
+  }
+
+  return fail(set, 502, 'LLM_ANALYSIS_FAILED', 'Failed to analyze the request with LLM.', error);
+};
 
 export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
   .use(authMiddleware)
@@ -67,47 +85,33 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
     })
   })
 
-  /*영수증 OCR 및 음성 데이터 텍스트 인식*/
-  .post('/parse-scan', async ({ body, user }: any) => {
+  /*Parse receipt OCR or voice text*/
+  .post('/parse-scan', async ({ body, user, set }: any) => {
     const { type, payload } = body;
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${getEnv('OPENROUTER_API_KEY')}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-flash-1.5',
-        messages: [
-          {
-            role: 'user',
-            content: type === 'OCR'
-              ? `영수증 내용에서 식품명과 표준 소비기한(일수)을 JSON 배열로만 반환해줘. 예시: [{"name":"두부","expiryDays":3}]\n${payload}`
-              : `다음 텍스트에서 식품명과 표준 소비기한(일수)을 JSON 배열로만 반환해줘. 예시: [{"name":"두부","expiryDays":3}]\n${payload}`
-          }
-        ]
-      })
-    });
+    let ingredients;
+    try {
+      ingredients = await parseIngredientsFromScan(type, payload);
+    } catch (error) {
+      return failLlm(set, error);
+    }
 
-    const result = await response.json();
-    // LLM이 마크다운으로 감싸서 반환할 경우 제거 후 파싱
-    const cleaned = result.choices[0].message.content.replace(/```json|```/g, '').trim();
-    const ingredients = JSON.parse(cleaned);
+    if (ingredients.length === 0) {
+      return { success: true, data: [] };
+    }
 
-    // DB에 저장 (본인 user_id 포함, 기본 수량 1)
-    const rows = ingredients.map((item: { name: string; expiryDays: number }) => {
-    const itemInfo = getItemCode(item.name); // 품목코드 자동 매핑
-    return {
+    const rows = ingredients.map((item) => {
+      const itemInfo = getItemCode(item.name);
+      return {
         name: item.name,
         quantity: 1,
         expired_at: new Date(Date.now() + item.expiryDays * 86400000).toISOString(),
         is_consumed: false,
         user_id: user.id,
-        item_cd: itemInfo?.item_cd || null,    // 품목코드
-        ctgry_cd: itemInfo?.ctgry_cd || null,  // 부류코드
-        ctgry_nm: itemInfo?.ctgry_nm || null   // 부류명
-    };
+        item_cd: itemInfo?.item_cd || null,
+        ctgry_cd: itemInfo?.ctgry_cd || null,
+        ctgry_nm: itemInfo?.ctgry_nm || null
+      };
     });
 
     const { data, error } = await supabase
@@ -123,7 +127,6 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
       payload: t.String()
     })
   })
-
   /* 식재료 직접 수동 소비 및 실시간 시세 계산 처리 */
   .post('/consume', async ({ body, user }: any) => {
     const { ingredient_id, carbon_reduced } = body;
@@ -208,57 +211,29 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
     })
   })
 
-  /*소비 완료 이미지 분석*/
-  .post('/consume-image', async ({ body, user }: any) => {
+  /*Analyze consumed ingredient image*/
+  .post('/consume-image', async ({ body, user, set }: any) => {
     const { ingredient_id, image } = body;
     const API_KEY = foodSafetyApiKey();
 
-    // LLM Vision으로 소비량/남은 양 분석
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${getEnv('OPENROUTER_API_KEY')}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-flash-1.5',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'image_url',
-                image_url: { url: `data:image/jpeg;base64,${image}` }
-              },
-              {
-                type: 'text',
-                text: '이 요리 사진을 보고 소비된 양(0~1 사이 비율)과 남은 양(0~1 사이 비율)을 JSON으로만 반환해줘. 예시: {"consumed_ratio":0.7,"remaining_ratio":0.3}'
-              }
-            ]
-          }
-        ]
-      })
-    });
-
-    const result = await response.json();
-    // LLM이 마크다운으로 감싸서 반환할 경우 제거 후 파싱
-    const cleaned = result.choices[0].message.content.replace(/```json|```/g, '').trim();
-    const { consumed_ratio, remaining_ratio } = JSON.parse(cleaned);
-
-    // 현재 식재료 조회
     const { data: ingredient, error: fetchError } = await supabase
       .from('ingredients')
       .select('name, quantity')
       .eq('id', ingredient_id)
-      .eq('user_id', user.id) // 본인 식재료만
+      .eq('user_id', user.id)
       .single();
 
     if (fetchError || !ingredient) return { success: false, error: fetchError.message };
 
-    const consumed_quantity = ingredient.quantity * consumed_ratio;
-    const remaining_quantity = ingredient.quantity * remaining_ratio;
+    let analysis;
+    try {
+      analysis = await analyzeConsumptionImage(image);
+    } catch (error) {
+      return failLlm(set, error);
+    }
 
-    // 💡 [수정] 고정 수식(* 500)을 걷어내고 실시간 수량-중량 매퍼 및 공공 시세 단가 연동
+    const consumed_quantity = ingredient.quantity * analysis.consumedRatio;
+    const remaining_quantity = ingredient.quantity * analysis.remainingRatio;
     const ingredientName = ingredient.name || 'default';
     const unitWeightKg = INGREDIENT_WEIGHTS_KG[ingredientName] || INGREDIENT_WEIGHTS_KG.default;
     const consumedWeightKg = unitWeightKg * consumed_quantity;
@@ -276,27 +251,23 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
         }
       }
     } catch (e) {
-      console.error("이미지 기반 시세 연산 실패 -> 방어 기본가 처리");
+      console.error('Image price lookup failed; using fallback price.');
     }
 
     const saved_money = Math.round(consumedWeightKg * currentKgPrice);
-
-    // 탄소 절감량 계산 (소비량 기준 기존 수식 유지 요청 반영)
     const carbon_reduced = consumed_quantity * 0.0025;
 
-    // 식재료 상태 업데이트
     const { error: updateError } = await supabase
       .from('ingredients')
       .update({
         remaining_quantity,
-        is_consumed: remaining_quantity < 0.1 // 거의 없으면 소비 완료
+        is_consumed: remaining_quantity < 0.1
       })
       .eq('id', ingredient_id)
-      .eq('user_id', user.id); // 본인 식재료만
+      .eq('user_id', user.id);
 
     if (updateError) return { success: false, error: updateError.message };
 
-    // 에코 절약 통계 저장 (실시간 saved_money 데이터 반영)
     const { error: logError } = await supabase
       .from('eco_savings_logs')
       .insert([
@@ -308,19 +279,18 @@ export const ingredientRoutes = new Elysia({ prefix: '/api/ingredients' })
     return {
       success: true,
       data: {
-        consumed_quantity,   // 소비된 양
-        remaining_quantity,  // 남은 양
-        saved_money,         // [수정] 실시간 계산된 진짜 절약 비용
-        carbon_reduced       // 탄소 절감량
+        consumed_quantity,
+        remaining_quantity,
+        saved_money,
+        carbon_reduced
       }
     };
   }, {
     body: t.Object({
       ingredient_id: t.String(),
-      image: t.String() // base64 인코딩된 이미지
+      image: t.String()
     })
   })
-
   /*캘린더 - 월별 식재료 소비기한 상태 조회*/
   .get('/calendar', async ({ query, user }: any) => {
     const { month } = query; // 예: 2026-05

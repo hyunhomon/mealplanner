@@ -1,6 +1,15 @@
 import type { IngredientSummary, RecipeRecommendation } from "@mealplanner/shared";
 
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3000";
+const normalizeApiBaseUrl = (value: string | undefined) => {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    throw new Error("VITE_API_BASE_URL is required for API requests.");
+  }
+
+  return trimmed.replace(/\/+$/, "");
+};
+
+export const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 
 export const SESSION_STORAGE_KEY = "greeney-session-v1";
 
@@ -42,6 +51,12 @@ interface IngredientRow {
   createdAt?: string;
   updated_at?: string;
   updatedAt?: string;
+}
+
+interface CreateIngredientInput {
+  name: string;
+  quantity: number;
+  expiredAt: string;
 }
 
 const unwrap = async <T>(response: Response): Promise<T> => {
@@ -146,6 +161,15 @@ export const submitMealPhoto = (image: string, recommendedRecipeName?: string) =
 
 export const loadIngredients = async () => {
   const rows = await request<IngredientRow[]>("/api/ingredients");
+  return rows.map(toIngredientView);
+};
+
+export const createIngredient = async ({ name, quantity, expiredAt }: CreateIngredientInput) => {
+  const rows = await request<IngredientRow[]>("/api/ingredients", {
+    method: "POST",
+    body: JSON.stringify({ name, quantity, expired_at: expiredAt }),
+  });
+
   return rows.map(toIngredientView);
 };
 
