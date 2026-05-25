@@ -4,11 +4,11 @@ import { swagger } from '@elysiajs/swagger';
 import { authRoutes } from './routes/auth';
 import { ingredientRoutes } from './routes/ingredients';
 import { recipeRoutes } from './routes/recipes';
-import { reportRoutes } from './routes/reports';
+import { fail } from './lib/responses';
 
 const app = new Elysia()
   .use(cors({
-    origin: ['http://localhost:5173'] // 프론트 개발 포트만 허용
+    origin: [Bun.env.WEB_ORIGIN ?? 'http://localhost:5173']
   }))
   .use(swagger({
     path: '/swagger',
@@ -19,18 +19,39 @@ const app = new Elysia()
         description: 'MealPlanner backend API'
       },
       tags: [
+        { name: 'Health', description: 'Server health endpoints' },
         { name: 'Auth', description: 'Authentication endpoints' },
         { name: 'Ingredients', description: 'User ingredient and catalog endpoints' },
-        { name: 'Recipes', description: 'Recipe search and recommendation endpoints' },
-        { name: 'Reports', description: 'Savings and usage report endpoints' }
+        { name: 'Recipes', description: 'Recipe search and recommendation endpoints' }
       ]
     }
   }))
-  .get('/', () => 'MealPlanner API Server is Running')
+  .onError(({ code, error, set }) => {
+    if (code === 'VALIDATION') {
+      return fail(set, 400, 'VALIDATION_ERROR', 'Request validation failed.', error);
+    }
+
+    if (set.status === 401) {
+      return fail(set, 401, 'UNAUTHORIZED', 'Authentication is required.');
+    }
+
+    return fail(set, 500, 'INTERNAL_SERVER_ERROR', 'Unexpected server error.', error);
+  })
+  .get('/', () => ({
+    success: true,
+    data: {
+      name: 'MealPlanner API',
+      status: 'ok'
+    }
+  }), {
+    detail: {
+      tags: ['Health'],
+      summary: 'Health check'
+    }
+  })
   .use(authRoutes)
   .use(ingredientRoutes)
   .use(recipeRoutes)
-  .use(reportRoutes)
   .listen(3000);
 
 console.log(`http://localhost:3000`);

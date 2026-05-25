@@ -1,85 +1,105 @@
-import { Elysia, t } from 'elysia';
+import { Elysia } from 'elysia';
 import { supabase } from '../supabase';
+import { authMiddleware } from '../middleware/auth';
+import { authSchemas } from '../schemas';
+import { fail, ok } from '../lib/responses';
 
-export const authRoutes = new Elysia({ prefix: '/auth' })
-  /*이메일 회원가입*/
-  .post('/signup', async ({ body }) => {
-    const { email, password } = body;
-    const { data, error } = await supabase.auth.signUp({ email, password });
-    if (error) return { success: false, error: error.message };
-    return { success: true, data };
+const redirectTo = Bun.env.AUTH_REDIRECT_URL ?? 'http://localhost:5173';
+
+export const authRoutes = new Elysia({ prefix: '/auth', tags: ['Auth'] })
+  .post('/signup', async ({ body, set }) => {
+    const { data, error } = await supabase.auth.signUp(body);
+    if (error) return fail(set, 400, 'SIGNUP_FAILED', error.message);
+
+    return ok(data);
   }, {
-    body: t.Object({
-      email: t.String(),
-      password: t.String()
-    })
+    body: authSchemas.emailPassword,
+    detail: {
+      tags: ['Auth'],
+      summary: 'Sign up with email and password'
+    }
   })
 
-  /*이메일 로그인*/
-  .post('/login', async ({ body }) => {
-    const { email, password } = body;
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) return { success: false, error: error.message };
-    return { success: true, data };
+  .post('/login', async ({ body, set }) => {
+    const { data, error } = await supabase.auth.signInWithPassword(body);
+    if (error) return fail(set, 401, 'LOGIN_FAILED', error.message);
+
+    return ok(data);
   }, {
-    body: t.Object({
-      email: t.String(),
-      password: t.String()
-    })
+    body: authSchemas.emailPassword,
+    detail: {
+      tags: ['Auth'],
+      summary: 'Log in with email and password'
+    }
   })
 
-  /*로그아웃*/
-  .post('/logout', async () => {
-    const { error } = await supabase.auth.signOut();
-    if (error) return { success: false, error: error.message };
-    return { success: true };
-  })
+  .post('/phone', async ({ body, set }) => {
+    const { error } = await supabase.auth.signInWithOtp({ phone: body.phone });
+    if (error) return fail(set, 400, 'OTP_SEND_FAILED', error.message);
 
-  /*전화번호로 OTP 발송*/
-  .post('/phone', async ({ body }) => {
-    const { phone } = body;
-    const { error } = await supabase.auth.signInWithOtp({ phone });
-    if (error) return { success: false, error: error.message };
-    return { success: true, message: 'OTP가 발송됐어요.' };
+    return ok({ message: 'OTP sent.' });
   }, {
-    body: t.Object({
-      phone: t.String() // 예: +821012345678
-    })
+    body: authSchemas.phone,
+    detail: {
+      tags: ['Auth'],
+      summary: 'Send an SMS OTP'
+    }
   })
 
-  /*OTP 인증*/
-  .post('/verify-otp', async ({ body }) => {
-    const { phone, token } = body;
+  .post('/verify-otp', async ({ body, set }) => {
     const { data, error } = await supabase.auth.verifyOtp({
-      phone,
-      token,
+      phone: body.phone,
+      token: body.token,
       type: 'sms'
     });
-    if (error) return { success: false, error: error.message };
-    return { success: true, data };
+    if (error) return fail(set, 401, 'OTP_VERIFY_FAILED', error.message);
+
+    return ok(data);
   }, {
-    body: t.Object({
-      phone: t.String(),
-      token: t.String() // 예: 123456
-    })
+    body: authSchemas.verifyOtp,
+    detail: {
+      tags: ['Auth'],
+      summary: 'Verify an SMS OTP'
+    }
   })
 
-  /*Google 소셜 로그인*/
-  .post('/google', async () => {
+  .post('/google', async ({ set }) => {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
-      options: { redirectTo: 'http://localhost:5173' }
+      options: { redirectTo }
     });
-    if (error) return { success: false, error: error.message };
-    return { success: true, data };
+    if (error) return fail(set, 400, 'OAUTH_URL_FAILED', error.message);
+
+    return ok(data);
+  }, {
+    detail: {
+      tags: ['Auth'],
+      summary: 'Create a Google OAuth login URL'
+    }
   })
 
-  /*Apple 소셜 로그인*/
-  .post('/apple', async () => {
+  .post('/apple', async ({ set }) => {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'apple',
-      options: { redirectTo: 'http://localhost:5173' }
+      options: { redirectTo }
     });
-    if (error) return { success: false, error: error.message };
-    return { success: true, data };
+    if (error) return fail(set, 400, 'OAUTH_URL_FAILED', error.message);
+
+    return ok(data);
+  }, {
+    detail: {
+      tags: ['Auth'],
+      summary: 'Create an Apple OAuth login URL'
+    }
+  })
+
+  .use(authMiddleware)
+  .post('/logout', async () => {
+    // Supabase JWTs are stateless for this API. The client should clear its stored session after this acknowledgement.
+    return ok({ message: 'Logged out.' });
+  }, {
+    detail: {
+      tags: ['Auth'],
+      summary: 'Acknowledge logout for an authenticated user'
+    }
   });

@@ -1,45 +1,18 @@
-import { Elysia, t } from 'elysia';
+import { Elysia } from 'elysia';
 import type { Ingredient, Recipe, RecipeRecommendation } from '@mealplanner/shared';
 import { supabase } from '../supabase';
 import { authMiddleware } from '../middleware/auth';
 import { getIngredientCatalogItem } from '../services/ingredientCatalog';
-import { fetchRecipes } from '../services/recipeCatalog';
-
-type IngredientRow = {
-  id: string;
-  user_id: string;
-  item_code: string;
-  expires_at?: string;
-  expired_at?: string;
-  total_quantity?: number;
-  quantity?: number;
-  remaining_quantity?: number;
-  created_at: string;
-  updated_at?: string;
-};
-
-const toIngredient = (row: IngredientRow): Ingredient => ({
-  id: row.id,
-  userId: row.user_id,
-  itemCode: row.item_code,
-  expiresAt: row.expires_at ?? row.expired_at ?? '',
-  totalQuantity: Number(row.total_quantity ?? row.quantity ?? 1),
-  remainingQuantity: Number(row.remaining_quantity ?? row.quantity ?? 1),
-  createdAt: row.created_at,
-  updatedAt: row.updated_at ?? row.created_at
-});
+import { fetchRecipePage, fetchRecipes } from '../services/recipeCatalog';
+import { recipeSchemas } from '../schemas';
+import { daysUntil } from '../lib/dates';
+import { type IngredientRow, toIngredient } from '../lib/ingredients';
+import { fail, ok } from '../lib/responses';
 
 const compact = (value: unknown) => String(value ?? '').trim();
 
-const fail = (set: any, status: number, code: string, message: string, details?: unknown) => {
-  set.status = status;
-  return { success: false, error: { code, message, details } };
-};
-
 const includesKorean = (text: string, needle: string) =>
   text.toLocaleLowerCase('ko-KR').includes(needle.toLocaleLowerCase('ko-KR'));
-
-const daysUntil = (date: string) => Math.ceil((new Date(date).getTime() - Date.now()) / 86400000);
 
 const scoreRecipe = (
   recipe: Recipe,
@@ -58,11 +31,15 @@ const scoreRecipe = (
   const matchedNames = matched
     .map((ingredient) => ingredientNamesById.get(ingredient.id))
     .filter((name): name is string => Boolean(name));
+
   const missingIngredientNames = recipe.ingredientNames.filter(
     (name) => !matchedNames.some((matchedName) => includesKorean(name, matchedName) || includesKorean(matchedName, name))
   );
+
   const matchScore = matched.length / Math.max(recipe.ingredientNames.length || matched.length, 1);
   const expiringSoonScore = matched.filter((ingredient) => daysUntil(ingredient.expiresAt) <= expiringWithinDays).length / matched.length;
+
+  // Current recommendation is intentionally simple: mostly ingredient match, with a small boost for expiring food.
   const score = matchScore * 0.8 + expiringSoonScore * 0.2;
 
   return {
@@ -76,39 +53,39 @@ const scoreRecipe = (
   };
 };
 
-export const recipeRoutes = new Elysia({ prefix: '/api/recipes' })
+export const recipeRoutes = new Elysia({ prefix: '/api/recipes', tags: ['Recipes'] })
   .use(authMiddleware)
 
   .get('/', async ({ query, set }) => {
     try {
-      const page = Number(query.page ?? 1);
-      const pageSize = Number(query.pageSize ?? 50);
+      const page = query.page ?? 1;
+      const pageSize = query.pageSize ?? 50;
       const start = (page - 1) * pageSize + 1;
-      const recipes = await fetchRecipes(start, start + pageSize - 1);
-      return {
-        success: true,
-        data: {
-          items: recipes,
-          page,
-          pageSize,
-          totalCount: recipes.length
-        }
-      };
+      const recipePage = await fetchRecipePage(start, start + pageSize - 1);
+
+      return ok({
+        items: recipePage.items,
+        page,
+        pageSize,
+        totalCount: recipePage.totalCount
+      });
     } catch (error) {
       return fail(set, 502, 'RECIPE_API_ERROR', 'Failed to fetch recipes.', error);
     }
   }, {
-    query: t.Object({
-      page: t.Optional(t.Numeric()),
-      pageSize: t.Optional(t.Numeric())
-    })
+    query: recipeSchemas.listQuery,
+    detail: {
+      tags: ['Recipes'],
+      summary: 'List recipes from the public recipe catalog',
+      description: 'Proxies the Food Safety Korea recipe API and normalizes its field names.'
+    }
   })
 
   .get('/recommend', async (ctx: any) => {
     const { query, user, set } = ctx;
-    const limit = Number(query.limit ?? 10);
-    const maxMissingIngredients = Number(query.maxMissingIngredients ?? 8);
-    const expiringWithinDays = Number(query.expiringWithinDays ?? 3);
+    const limit = query.limit ?? 10;
+    const maxMissingIngredients = query.maxMissingIngredients ?? 8;
+    const expiringWithinDays = query.expiringWithinDays ?? 3;
 
     const { data, error } = await supabase
       .from('ingredients')
@@ -120,7 +97,7 @@ export const recipeRoutes = new Elysia({ prefix: '/api/recipes' })
     if (error) return fail(set, 500, 'INGREDIENT_LIST_FAILED', error.message);
 
     const ingredients = ((data ?? []) as IngredientRow[]).map(toIngredient);
-    if (ingredients.length === 0) return { success: true, data: [] };
+    if (ingredients.length === 0) return ok([]);
 
     try {
       const catalogItems = await Promise.all(
@@ -135,7 +112,8 @@ export const recipeRoutes = new Elysia({ prefix: '/api/recipes' })
           .filter(([, name]) => Boolean(name))
       );
 
-      const recipes = await fetchRecipes(1, Number(Bun.env.RECIPE_RECOMMENDATION_SCAN_LIMIT ?? 1000));
+      const scanLimit = Number(Bun.env.RECIPE_RECOMMENDATION_SCAN_LIMIT ?? 1000);
+      const recipes = await fetchRecipes(1, scanLimit);
       const recommendations = recipes
         .map((recipe) => scoreRecipe(recipe, ingredients, ingredientNamesById, expiringWithinDays))
         .filter((item): item is RecipeRecommendation => Boolean(item))
@@ -143,14 +121,14 @@ export const recipeRoutes = new Elysia({ prefix: '/api/recipes' })
         .sort((a, b) => b.score - a.score)
         .slice(0, limit);
 
-      return { success: true, data: recommendations };
+      return ok(recommendations);
     } catch (error) {
       return fail(set, 502, 'RECIPE_API_ERROR', 'Failed to recommend recipes.', error);
     }
   }, {
-    query: t.Object({
-      limit: t.Optional(t.Numeric()),
-      maxMissingIngredients: t.Optional(t.Numeric()),
-      expiringWithinDays: t.Optional(t.Numeric())
-    })
+    query: recipeSchemas.recommendationQuery,
+    detail: {
+      tags: ['Recipes'],
+      summary: 'Recommend recipes from active user ingredients'
+    }
   });
