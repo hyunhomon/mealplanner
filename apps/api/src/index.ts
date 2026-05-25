@@ -1,5 +1,6 @@
 import { Elysia } from 'elysia';
 import { cors } from '@elysiajs/cors';
+import { swagger } from '@elysiajs/swagger';
 import { authRoutes } from './routes/auth';
 import { ingredientRoutes } from './routes/ingredients';
 import { recipeRoutes } from './routes/recipes';
@@ -8,8 +9,16 @@ import { characterRoutes } from './routes/character';
 import { preferencesRoutes } from './routes/preferences';
 
 const app = new Elysia()
+  .use(swagger({
+    documentation: {
+      info: {
+        title: 'MealPlanner API',
+        version: '1.0.0'
+      }
+    }
+  }))
   .use(cors({
-    origin: ['http://localhost:5173'] // 프론트 개발 포트만 허용
+    origin: ['http://localhost:5173']
   }))
   .get('/', () => 'MealPlanner API Server is Running')
   .use(authRoutes)

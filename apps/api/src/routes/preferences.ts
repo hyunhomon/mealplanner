@@ -1,26 +1,24 @@
 import { Elysia, t } from 'elysia';
 import { supabase } from '../supabase';
-import { authMiddleware } from '../middleware/auth';
+import { getUser } from '../lib/getUser';
 
 export const preferencesRoutes = new Elysia({ prefix: '/api/preferences' })
-  .use(authMiddleware)
 
   /*선호 식단 조회*/
-  .get('/', async ({ user }) => {
+  .get('/', async ({ headers }) => {
+    const user = await getUser(headers);
+    if (!user) return { success: false, error: 'Unauthorized' };
+
     const { data, error } = await supabase
       .from('user_preferences')
       .select('id, user_id, health_condition, created_at')
       .eq('user_id', user.id)
       .single();
 
-    // 없으면 기본값으로 자동 생성
     if (error || !data) {
       const { data: newPref, error: createError } = await supabase
         .from('user_preferences')
-        .insert([{
-          user_id: user.id,
-          health_condition: '일반'
-        }])
+        .insert([{ user_id: user.id, health_condition: '일반' }])
         .select()
         .single();
 
@@ -32,7 +30,10 @@ export const preferencesRoutes = new Elysia({ prefix: '/api/preferences' })
   })
 
   /*선호 식단 수정*/
-  .post('/', async ({ body, user }) => {
+  .post('/', async ({ body, headers }) => {
+    const user = await getUser(headers);
+    if (!user) return { success: false, error: 'Unauthorized' };
+
     const { health_condition } = body;
 
     const { data: existing } = await supabase
@@ -63,6 +64,6 @@ export const preferencesRoutes = new Elysia({ prefix: '/api/preferences' })
     return { success: true, data };
   }, {
     body: t.Object({
-      health_condition: t.String() // 일반/비건/다이어트/저염식
+      health_condition: t.String()
     })
   });
